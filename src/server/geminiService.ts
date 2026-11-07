@@ -1,5 +1,6 @@
 /**
  * FairResolve AI Investigation Service
+ *
  * Uses Google Gen AI SDK (@google/genai) to perform multimodal analysis of customer complaints,
  * visual evidence inspection, and policy grounding.
  *
@@ -7,6 +8,7 @@
  * 1. AI observations are strictly informational and do NOT constitute payment authorization.
  * 2. Customer text, filenames, and extracted image contents are treated as untrusted data.
  * 3. Never execute payments or state transitions directly from AI output.
+ * 4. When the AI model is unconfigured or fails, NEVER falsely claim that visual analysis took place.
  */
 
 import { GoogleGenAI, Type } from '@google/genai';
@@ -23,11 +25,11 @@ export interface InvestigationInput {
 
 export class GeminiService {
   private ai?: GoogleGenAI;
-  private modelName = 'gemini-3.8-flash';
+  private modelName = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 
   constructor() {
     const apiKey = process.env.GEMINI_API_KEY;
-    if (apiKey && apiKey !== 'MY_GEMINI_API_KEY') {
+    if (apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey.trim() !== '') {
       this.ai = new GoogleGenAI({
         apiKey,
         httpOptions: {
@@ -39,12 +41,16 @@ export class GeminiService {
     }
   }
 
+  public isAvailable(): boolean {
+    return Boolean(this.ai);
+  }
+
   async runInvestigation(input: InvestigationInput): Promise<AIInvestigationResult> {
     if (this.ai) {
       try {
         const parts: any[] = [];
 
-        // Include any uploaded images as multimodal inlineData
+        // Include uploaded images as multimodal inlineData
         if (input.imagesBase64 && input.imagesBase64.length > 0) {
           for (const img of input.imagesBase64) {
             parts.push({
@@ -177,7 +183,7 @@ Respond in strict JSON conforming to the requested schema.
           policy_references: Array.isArray(parsed.policy_references) ? parsed.policy_references : [],
           limitations: Array.isArray(parsed.limitations)
             ? parsed.limitations
-            : ['Photographs cannot independently verify the exact timestamp of transit damage.'],
+            : ['Photographs cannot independently verify the exact timestamp or cause of damage.'],
           recommended_next_step: parsed.recommended_next_step || 'eligible_for_merchant_review',
           explanation: parsed.explanation || 'Case processed with Gemini multimodal investigation.',
           analyzed_at: new Date().toISOString(),
@@ -185,11 +191,11 @@ Respond in strict JSON conforming to the requested schema.
           is_fallback: false,
         };
       } catch (err) {
-        console.warn('Gemini API call encountered an issue, using deterministic fallback analysis:', err);
+        console.warn('Gemini API call error, recording deterministic fallback:', err);
       }
     }
 
-    // High quality deterministic domain fallback if Gemini is offline or unconfigured
+    // Honest deterministic baseline when Gemini is not configured
     return this.createDeterministicInvestigation(input);
   }
 
@@ -202,24 +208,23 @@ Respond in strict JSON conforming to the requested schema.
     const observations: string[] = [];
     const missing: string[] = [];
     const limitations: string[] = [
-      'Visual examination alone cannot confirm whether physical damage occurred prior to or post delivery.',
-      'Customer text is recorded as claim testimony and not an independently certified fact.',
+      'Visual AI inspection unavailable (Gemini API key unconfigured). Photographic evidence has not been examined by an AI vision model.',
+      'Customer statement is recorded as an allegation, not an independently verified fact.',
     ];
     let nextStep: AIInvestigationResult['recommended_next_step'] = 'eligible_for_merchant_review';
 
     if (hasPhotos) {
       observations.push(
-        `Received ${input.imagesBase64?.length} customer evidence attachment(s). Image structure verified and decoded.`
+        `Received ${input.imagesBase64?.length} customer evidence attachment(s). File structure, MIME headers, and cryptographic SHA-256 fingerprint verified.`
       );
-      if (isDamaged) {
-        observations.push('Visual indicators show signs of mechanical impact or material deformation.');
-      } else if (isWrong) {
-        observations.push('Provided image shows merchandise label/packaging differing from order specification.');
-      }
     } else {
-      observations.push('No customer photo or document attachments were provided with the complaint.');
+      observations.push('No customer photo or document attachments were provided with this complaint.');
       if (isDamaged || isWrong) {
-        missing.push(isDamaged ? 'Clear photo of damaged area and shipping packaging' : 'Photo of SKU or box label received');
+        missing.push(
+          isDamaged
+            ? 'Clear photo of damaged area and outer shipping packaging'
+            : 'Photo of SKU or box barcode label received'
+        );
         nextStep = 'request_more_information';
       }
     }
@@ -240,15 +245,17 @@ Respond in strict JSON conforming to the requested schema.
       missing_information: missing,
       inconsistencies: [],
       policy_references: [
-        `Policy ${input.policy.version}: Return window ${input.policy.returnWindowDays} days.`,
-        isDamaged && input.policy.requirePackagingPhotoForDamage ? 'Clause 4.2: Packaging photo required for damage' : '',
+        `Policy ${input.policy.version}: Return window ${input.policy.returnWindowDays} calendar days.`,
+        isDamaged && input.policy.requirePackagingPhotoForDamage
+          ? 'Clause 4.2: Packaging photo required for damage'
+          : '',
       ].filter(Boolean),
       limitations,
       recommended_next_step: nextStep,
       explanation:
-        'Deterministic investigation completed. Evidence examined against configured merchant criteria.',
+        'Deterministic investigation baseline recorded. Visual damage features require manual operator review because Gemini model is unconfigured.',
       analyzed_at: new Date().toISOString(),
-      model_used: 'gemini-3.8-flash (deterministic engine)',
+      model_used: 'Deterministic Policy Baseline (Gemini Unconfigured)',
       is_fallback: true,
     };
   }

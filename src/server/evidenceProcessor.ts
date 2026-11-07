@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { EvidenceObject } from '../types';
-import { store } from './store';
+import { db } from './database';
 
 const UPLOADS_DIR = path.resolve(process.cwd(), 'private_uploads');
 
@@ -87,7 +87,7 @@ export class EvidenceProcessor {
     const sha256Hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
     // 4. Cross-case duplicate hash check
-    const duplicateCaseIds = store.findDuplicateEvidence(sha256Hash, caseId);
+    const duplicateCaseIds = db.findDuplicateEvidence(sha256Hash, caseId);
     const isDuplicate = duplicateCaseIds.length > 0;
 
     // 5. Store privately with unpredictable UUID filename

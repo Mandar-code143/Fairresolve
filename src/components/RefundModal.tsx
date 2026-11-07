@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, AlertTriangle, ShieldCheck, CreditCard, Lock, Loader2 } from 'lucide-react';
 import { Case, Order, User } from '../types';
+import { apiFetch } from '../utils/api';
 
 interface RefundModalProps {
   caseData: Case;
@@ -44,9 +45,8 @@ export const RefundModal: React.FC<RefundModalProps> = ({
     setErrorMessage(null);
 
     try {
-      const res = await fetch(`/api/v1/cases/${caseData.id}/refund`, {
+      const res = await apiFetch(`/api/v1/cases/${caseData.id}/refund`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           amount: numericAmount,
           reason,

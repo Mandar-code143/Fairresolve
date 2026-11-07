@@ -10,6 +10,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { RefundPolicy, User } from '../types';
+import { apiFetch } from '../utils/api';
 
 interface PolicyManagerViewProps {
   policy: RefundPolicy;
@@ -50,9 +51,8 @@ export const PolicyManagerView: React.FC<PolicyManagerViewProps> = ({
 
     setSubmitting(true);
     try {
-      const res = await fetch('/api/v1/policies/publish', {
+      const res = await apiFetch('/api/v1/policies/publish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           returnWindowDays,
           requirePackagingPhotoForDamage: requirePackagingPhoto,

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { History, Filter, Search, CheckCircle2, ShieldAlert, CreditCard, Sparkles, User, RefreshCw } from 'lucide-react';
 import { CaseEvent } from '../types';
+import { apiFetch } from '../utils/api';
 
 export const AuditLedgerView: React.FC = () => {
   const [events, setEvents] = useState<CaseEvent[]>([]);
@@ -10,7 +11,7 @@ export const AuditLedgerView: React.FC = () => {
 
   const fetchEvents = () => {
     setLoading(true);
-    fetch('/api/v1/audit/events')
+    apiFetch('/api/v1/audit/events')
       .then((res) => res.json())
       .then((data) => {
         setEvents(data.events || []);

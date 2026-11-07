@@ -12,6 +12,7 @@ import {
   Webhook,
 } from 'lucide-react';
 import { PayPalGatewayStatus } from '../types';
+import { apiFetch } from '../utils/api';
 
 interface PayPalIntegrationViewProps {
   status: PayPalGatewayStatus;
@@ -34,7 +35,7 @@ export const PayPalIntegrationView: React.FC<PayPalIntegrationViewProps> = ({
     setTestResult(null);
 
     try {
-      const res = await fetch('/api/v1/paypal/verify', { method: 'POST' });
+      const res = await apiFetch('/api/v1/paypal/verify', { method: 'POST' });
       const data = await res.json();
       setTestResult(data);
       onRefresh();

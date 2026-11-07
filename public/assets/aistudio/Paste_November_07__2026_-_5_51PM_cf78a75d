@@ -1,0 +1,2484 @@
+# FAIRRESOLVE — ULTIMATE FULL-STACK TRANSFORMATION, ENGINEERING, SECURITY, UI/UX AND DEPLOYMENT MASTER PROMPT
+
+## PROJECT: FAIRRESOLVE
+### Evidence-aware AI dispute investigation and PayPal refund resolution platform
+
+**Repository:** https://github.com/Mandar-code143/Fairresolve
+
+**Existing application:** Google AI Studio generated TypeScript, Express, React, Vite and Tailwind application.
+
+**Primary objective:** Transform the existing application into a complete, reliable, secure, polished, fully functional, deployable fintech product while preserving and improving all useful existing code.
+
+**Development approach:** Modify the current project in place. Do not unnecessarily regenerate the application. Do not discard useful components. Do not build a separate unrelated codebase.
+
+---
+
+# 0. YOUR RESPONSIBILITY
+
+You are taking complete ownership of the engineering transformation of FairResolve.
+
+Act simultaneously as:
+
+- Principal software architect.
+- Senior TypeScript engineer.
+- Backend infrastructure engineer.
+- Frontend product engineer.
+- Fintech payment integration specialist.
+- PayPal REST API specialist.
+- AI and multimodal investigation engineer.
+- PostgreSQL database architect.
+- Application security engineer.
+- UI/UX designer.
+- Quality assurance engineer.
+- DevOps and deployment engineer.
+
+You are not being asked to create a visual prototype.
+
+You are being asked to transform an existing working prototype into a much more complete application.
+
+**You are the technical brain of this project. Make architecture decisions, implement them, connect all modules, execute tests, identify failures and fix them.**
+
+Do not merely tell the user what needs to be done.
+
+Actually perform the work in the available development environment.
+
+Do not stop after analyzing the existing code.
+
+Do not stop after creating architecture diagrams.
+
+Do not stop after implementing only the easy features.
+
+Continue until all implementable tasks are completed or genuinely blocked by a missing external dependency, unavailable credential, platform restriction or approval requirement.
+
+Do not request confirmation for ordinary engineering decisions.
+
+Ask the user for credentials only when necessary. Tell them the precise variable name, where to obtain it and where to configure it.
+
+If an external credential is missing, finish all work that does not depend on that credential. Implement the integration adapter, tests and configuration instructions, but never pretend an external integration has been verified.
+
+Never fabricate a successful build, test, API call, refund or deployment.
+
+---
+
+# 1. PROJECT UNDERSTANDING — DO NOT CHANGE THE CORE IDEA
+
+FairResolve is an evidence-aware, policy-grounded dispute investigation and refund resolution platform for online merchants who use PayPal.
+
+It transforms unstructured customer complaints into structured investigations.
+
+It combines:
+
+1. Customer-reported information.
+2. Verified PayPal transaction information.
+3. Merchant-provided information.
+4. Customer-submitted evidence.
+5. AI-generated evidence observations.
+6. Deterministic merchant refund-policy evaluation.
+7. Explicit merchant authorization.
+8. Actual PayPal refund execution.
+9. Audit history and payment reconciliation.
+
+## Official product statement
+
+"FairResolve transforms unstructured customer complaints into structured, evidence-aware, policy-grounded investigations, then enables authorized merchants to make informed decisions and execute verified refunds through PayPal."
+
+This is not another AI chatbot.
+
+It must not become a generic CRM, helpdesk or administrative dashboard.
+
+The main product is an operational dispute-investigation and payment-resolution system.
+
+## Non-negotiable principle
+
+A customer claim is not a verified fact.
+
+An AI observation is not proof.
+
+A policy recommendation is not merchant authorization.
+
+A refund request is not a completed refund.
+
+Only the merchant has authority to approve a refund, and only PayPal's actual response can establish the corresponding PayPal payment status.
+
+---
+
+# 2. FIRST INSPECT THE EXISTING PROJECT
+
+Before modifying any files, inspect the entire existing workspace.
+
+Current files include:
+
+```text
+server.ts
+package.json
+vite.config.ts
+tsconfig.json
+.env.example
+.gitignore
+README.md
+IMPLEMENTATION_STATUS.md
+
+src/
+  App.tsx
+  main.tsx
+  index.css
+
+  types/
+    index.ts
+
+  server/
+    store.ts
+    policyEngine.ts
+    evidenceProcessor.ts
+    geminiService.ts
+    paypalGateway.ts
+
+  components/
+    DashboardView.tsx
+    CaseInboxView.tsx
+    CaseDetailView.tsx
+    CustomerPortalView.tsx
+    CheckoutSimulatorView.tsx
+    RefundModal.tsx
+    PolicyManagerView.tsx
+    PayPalIntegrationView.tsx
+    AuditLedgerView.tsx
+    EvidenceModal.tsx
+    Navbar.tsx
+    Badges.tsx
+    DocsView.tsx
+
+docs/
+  THREAT_MODEL.md
+```
+
+There may be additional files not included in this inventory. Discover the actual current workspace tree and use the current filesystem as the source of truth.
+
+Read the existing implementations thoroughly.
+
+Inspect the actual Git branch and working-tree state. Preserve existing work and secrets. Do not delete uncommitted user changes.
+
+If Git is available, create a separate development branch called:
+
+`security-persistence-refactor`
+
+Do not push unverified changes directly to `main`.
+
+Do not overwrite the current implementation with a fresh template.
+
+## Important rule
+
+README and IMPLEMENTATION_STATUS.md contain descriptions of functionality. They are not proof that the functionality is implemented.
+
+Verify all claims against source code and runtime behavior.
+
+The actual source code is authoritative.
+
+---
+
+# 3. EXISTING IMPLEMENTATION — PRESERVE WHAT IS GOOD, FIX WHAT IS WRONG
+
+The current application has useful functionality:
+
+- Merchant dashboard.
+- Case inbox.
+- Customer complaint portal.
+- Case investigation interface.
+- Evidence viewer.
+- Policy manager.
+- Refund confirmation modal.
+- PayPal integration status screen.
+- Audit ledger interface.
+- Gemini multimodal investigation service.
+- Deterministic policy engine.
+- Initial PayPal REST gateway.
+- File-signature checking and SHA-256 evidence fingerprinting.
+- Demo checkout workflow.
+
+Preserve these features and improve their implementation.
+
+Do not rewrite all React components unnecessarily.
+
+However, several core implementation defects must be resolved.
+
+## 3.1 Existing global user simulation
+
+The current `server.ts` contains:
+
+```ts
+let currentUserId = 'usr-01';
+```
+
+It uses this global variable to establish the current user.
+
+It also contains:
+
+```text
+POST /api/v1/auth/switch-role
+```
+
+This is a demo role switcher, not authentication.
+
+**Required changes:**
+
+- Remove global user identity.
+- Remove the unrestricted role-switch endpoint.
+- Implement real merchant authentication.
+- Implement server-verified sessions.
+- Implement merchant memberships.
+- Implement tenant-level permissions.
+- Enforce authentication and authorization on every protected API.
+- Keep a demo-account workflow only in explicitly marked development/demo mode.
+- Do not expose seeded user identities as real authenticated accounts.
+
+## 3.2 Existing in-memory database
+
+The current `src/server/store.ts` uses Maps for:
+
+- Users.
+- Tenants.
+- Orders.
+- Cases.
+- Policies.
+- Refund attempts.
+
+This is temporary demo storage.
+
+Replace it with durable PostgreSQL.
+
+Do not delete the seed data. Convert it into explicitly labeled demo seed records that can be inserted into the database.
+
+Data must survive server restarts.
+
+Do not use an in-memory Map as the authoritative payment, evidence, merchant or case database.
+
+## 3.3 Existing payment safety issues
+
+The current `paypalGateway.ts` has some genuine PayPal REST integration code, but also contains simulated fallback behavior.
+
+The current code can:
+
+- Return synthetic order IDs after a failed PayPal request.
+- Generate synthetic capture IDs.
+- Generate synthetic refund IDs.
+- Use a fixed simulated capture amount of $149.99.
+- Treat some ambiguous failures as simulation or fallback responses.
+
+This must be corrected.
+
+Actual PayPal Sandbox mode must never silently turn a failed request into a simulated success.
+
+## 3.4 Existing checkout problem
+
+The current checkout calls order creation and capture sequentially, without properly demonstrating a buyer approval lifecycle.
+
+Implement a genuine PayPal Checkout flow:
+
+1. Backend creates a PayPal Sandbox order.
+2. Frontend renders the official PayPal JavaScript SDK checkout button.
+3. Buyer approves the order through PayPal Sandbox.
+4. Frontend calls the backend capture endpoint using the returned PayPal order identifier.
+5. Backend verifies the order and capture response.
+6. Backend stores the real order, capture, amount and currency.
+7. Backend generates a secure customer complaint link.
+
+Never capture an order simply because the browser requested a checkout session.
+
+Never trust browser-supplied payment amounts or status.
+
+## 3.5 Existing authentication and authorization issue
+
+Every route must be examined individually.
+
+Examples of currently exposed operations include:
+
+- Case listing.
+- Case retrieval.
+- Case analysis.
+- Merchant review.
+- Refund execution.
+- Evidence upload and retrieval.
+- Orders listing.
+- Customer case submission.
+- Policy publication.
+- PayPal status.
+- Audit events.
+
+Implement route-level authentication and authorization.
+
+Customer-access-token endpoints are a separate explicitly limited access path. They must only expose the permitted information for that particular case.
+
+## 3.6 Existing evidence security issue
+
+The current evidence processor performs basic byte-signature checks and hashing, but it does not implement the complete image safety pipeline.
+
+The evidence retrieval endpoint also lacks sufficient authorization.
+
+Replace this with secure private evidence processing.
+
+## 3.7 Existing Gemini handling issue
+
+The current Gemini service contains a useful multimodal prompt, but it parses the resulting JSON without sufficient runtime validation.
+
+Its deterministic fallback may produce generic observations that look like real visual inspection results.
+
+Fix that distinction.
+
+An unavailable Gemini model must never be presented as having inspected an image.
+
+## 3.8 Existing policy issues
+
+Review `policyEngine.ts` completely.
+
+Fix the behavior of:
+
+- Return windows.
+- Delivery dates.
+- Calendar days versus business days.
+- Packaging evidence requirements.
+- Wrong-item label requirements.
+- Carrier-verification conditions.
+- Physical return thresholds.
+- Partial refund percentage.
+- Partial refunds without return.
+- Duplicate evidence flags.
+- Maximum instant refund threshold.
+- Refundable balance.
+- Policy version selection.
+- Currency and monetary calculations.
+
+Make the policy rules deterministic and extensively tested.
+
+---
+
+# 4. TECHNOLOGY ARCHITECTURE
+
+Retain the current TypeScript ecosystem unless there is a demonstrated technical reason not to.
+
+The current code is already TypeScript.
+
+There is no need to migrate everything to Python simply because Python was originally considered.
+
+Use this stack:
+
+## Frontend
+
+- React.
+- TypeScript.
+- Vite.
+- Tailwind CSS.
+- shadcn/ui.
+- Radix UI components where helpful.
+- Lucide icons.
+- TanStack Query for server state.
+- React Hook Form for forms.
+- Zod for frontend validation.
+- Playwright for browser testing.
+
+## Backend
+
+- Node.js.
+- TypeScript.
+- Express, refactored into a modular application.
+- Zod for API input/output validation.
+- PostgreSQL.
+- A maintained TypeScript-compatible ORM with migration support.
+- Proper database transactions.
+- Secure sessions.
+- Background worker.
+- Official Google Gen AI SDK.
+- PayPal REST API integration.
+
+Select dependency versions after inspecting the actual environment and checking current official documentation.
+
+Pin tested versions.
+
+Do not blindly upgrade everything.
+
+## Database
+
+PostgreSQL is mandatory for the durable version.
+
+Use a consistent ORM and migration tool.
+
+A practical choice is Prisma with PostgreSQL, provided its currently supported version is compatible with the environment. Verify the official documentation and Node.js compatibility before installing.
+
+Do not mix different ORM patterns.
+
+## Background work
+
+Use PostgreSQL-backed transactional outbox jobs initially.
+
+The API and background worker may be separate processes from the same repository.
+
+Do not introduce Redis, Kafka or unnecessary microservices.
+
+## Image processing
+
+Use a safe image-decoding and re-encoding library such as Sharp, after verifying its current supported version and native deployment requirements.
+
+## Testing
+
+- Vitest.
+- Supertest.
+- Playwright.
+- TypeScript type checking.
+- ESLint or an equivalent linter.
+- Dependency auditing.
+- Secret scanning.
+- GitHub Actions.
+
+---
+
+# 5. NEW PROJECT STRUCTURE
+
+Refactor the current project toward:
+
+```text
+Fairresolve/
+│
+├── backend/
+│   ├── src/
+│   │   ├── app.ts
+│   │   ├── server.ts
+│   │   │
+│   │   ├── api/
+│   │   │   ├── middleware/
+│   │   │   │   ├── authentication.ts
+│   │   │   │   ├── authorization.ts
+│   │   │   │   ├── tenantContext.ts
+│   │   │   │   ├── rateLimit.ts
+│   │   │   │   └── errorHandler.ts
+│   │   │   │
+│   │   │   └── v1/
+│   │   │       ├── auth.routes.ts
+│   │   │       ├── users.routes.ts
+│   │   │       ├── merchants.routes.ts
+│   │   │       ├── teams.routes.ts
+│   │   │       ├── cases.routes.ts
+│   │   │       ├── customer.routes.ts
+│   │   │       ├── evidence.routes.ts
+│   │   │       ├── orders.routes.ts
+│   │   │       ├── checkout.routes.ts
+│   │   │       ├── policies.routes.ts
+│   │   │       ├── approvals.routes.ts
+│   │   │       ├── refunds.routes.ts
+│   │   │       ├── paypal.routes.ts
+│   │   │       ├── webhooks.routes.ts
+│   │   │       └── audit.routes.ts
+│   │   │
+│   │   ├── config/
+│   │   │   ├── env.ts
+│   │   │   ├── database.ts
+│   │   │   └── constants.ts
+│   │   │
+│   │   ├── database/
+│   │   │   ├── schema/
+│   │   │   ├── migrations/
+│   │   │   ├── repositories/
+│   │   │   ├── seed.ts
+│   │   │   └── client.ts
+│   │   │
+│   │   ├── domain/
+│   │   │   ├── cases/
+│   │   │   ├── policies/
+│   │   │   ├── evidence/
+│   │   │   ├── payments/
+│   │   │   ├── merchant/
+│   │   │   └── audit/
+│   │   │
+│   │   ├── services/
+│   │   │   ├── ai/
+│   │   │   │   ├── aiProvider.ts
+│   │   │   │   ├── geminiProvider.ts
+│   │   │   │   ├── investigationService.ts
+│   │   │   │   └── schemas.ts
+│   │   │   │
+│   │   │   ├── payments/
+│   │   │   │   ├── paymentGateway.ts
+│   │   │   │   ├── paypalGateway.ts
+│   │   │   │   ├── paymentVerification.ts
+│   │   │   │   ├── refundService.ts
+│   │   │   │   └── reconciliationService.ts
+│   │   │   │
+│   │   │   ├── evidence/
+│   │   │   │   ├── imageProcessor.ts
+│   │   │   │   ├── fileValidator.ts
+│   │   │   │   ├── evidenceStorage.ts
+│   │   │   │   └── duplicateDetection.ts
+│   │   │   │
+│   │   │   ├── policies/
+│   │   │   │   ├── policyEngine.ts
+│   │   │   │   ├── policyValidator.ts
+│   │   │   │   └── policyVersioning.ts
+│   │   │   │
+│   │   │   ├── audit/
+│   │   │   │   └── auditService.ts
+│   │   │   │
+│   │   │   └── cases/
+│   │   │       ├── caseService.ts
+│   │   │       └── caseStateMachine.ts
+│   │   │
+│   │   ├── worker/
+│   │   │   ├── worker.ts
+│   │   │   ├── outbox.ts
+│   │   │   └── handlers/
+│   │   │
+│   │   └── utils/
+│   │
+│   └── tests/
+│       ├── unit/
+│       ├── integration/
+│       ├── security/
+│       ├── payments/
+│       └── fixtures/
+│
+├── frontend/
+│   ├── src/
+│   │   ├── app/
+│   │   ├── routes/
+│   │   ├── components/
+│   │   ├── features/
+│   │   │   ├── auth/
+│   │   │   ├── onboarding/
+│   │   │   ├── dashboard/
+│   │   │   ├── cases/
+│   │   │   ├── customerPortal/
+│   │   │   ├── evidence/
+│   │   │   ├── policies/
+│   │   │   ├── paypal/
+│   │   │   ├── approvals/
+│   │   │   ├── refunds/
+│   │   │   ├── audit/
+│   │   │   └── settings/
+│   │   ├── hooks/
+│   │   ├── lib/
+│   │   ├── services/
+│   │   ├── styles/
+│   │   └── types/
+│   └── tests/
+│
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── DATA_MODEL.md
+│   ├── THREAT_MODEL.md
+│   ├── SECURITY.md
+│   ├── API_REFERENCE.md
+│   ├── PAYMENT_FLOW.md
+│   ├── AI_SAFETY.md
+│   ├── DEPLOYMENT.md
+│   └── TEST_STRATEGY.md
+│
+├── infra/
+│   ├── docker/
+│   └── deployment/
+│
+├── docker-compose.yml
+├── .env.example
+├── package.json
+├── README.md
+├── IMPLEMENTATION_STATUS.md
+├── THIRD_PARTY_NOTICES.md
+├── SECURITY.md
+├── LICENSE
+└── .gitignore
+```
+
+You may adapt the structure for a TypeScript monorepo, but maintain clear boundaries between frontend, backend, domain logic, data access and external integrations.
+
+Do not create a folder structure only for appearance. Every module must have a genuine responsibility.
+
+---
+
+# 6. DATABASE AND PERSISTENCE — IMPLEMENT FULLY
+
+Replace the old in-memory store.
+
+Create durable PostgreSQL tables for:
+
+### Merchant and authentication
+
+- `tenants`
+- `users`
+- `tenant_memberships`
+- `sessions`
+- `tenant_invitations`
+
+### PayPal and order data
+
+- `paypal_connections`
+- `orders`
+- `order_items`
+- `payment_captures`
+
+### Dispute operations
+
+- `cases`
+- `customer_access_tokens`
+- `evidence_objects`
+- `policies`
+- `policy_versions`
+- `policy_evaluations`
+- `ai_runs`
+- `approvals`
+- `refund_attempts`
+
+### Audit and operational reliability
+
+- `case_events`
+- `paypal_webhook_events`
+- `outbox_events`
+- `system_operation_logs`
+
+Implement:
+
+- Primary keys.
+- Foreign keys.
+- Unique constraints.
+- Appropriate indexes.
+- Tenant ownership.
+- Transaction handling.
+- Migration files.
+- Database connection management.
+- Clean shutdown.
+
+All merchant-owned records must have tenant ownership enforced through backend authorization and database queries.
+
+Never trust a `tenantId` submitted by the browser.
+
+Derive active tenant from the authenticated user's authorized membership.
+
+For multiple tenant memberships, let the user switch organizations only after the backend verifies their membership.
+
+The database must be the authoritative source of truth.
+
+---
+
+# 7. MERCHANT AUTHENTICATION AND RBAC
+
+Build a real merchant authentication system.
+
+## Login and user management
+
+Support:
+
+- Secure account creation for merchant owners.
+- Merchant login.
+- Logout.
+- Session expiration.
+- Session revocation.
+- Invite-based team member onboarding.
+- Password changes.
+- Secure account recovery where a valid delivery service is configured.
+- Profile management.
+- Merchant display-name and business-name configuration.
+
+Do not require the customer submitting a complaint to create a merchant account.
+
+## Authentication security
+
+Use:
+
+- Argon2id password hashing.
+- Cryptographically secure session IDs.
+- Server-side session storage in PostgreSQL.
+- Hashed session-token storage where practical.
+- HTTP-only cookies.
+- Secure cookie flags in HTTPS deployment.
+- SameSite=Lax or stricter as appropriate.
+- CSRF protections.
+- Login rate limiting.
+- Generic authentication errors.
+- Session invalidation.
+- No long-lived authentication tokens in localStorage.
+
+## Role definitions
+
+Support:
+
+- OWNER
+- ADMIN
+- REVIEWER
+- ANALYST
+- VIEWER
+
+Permissions:
+
+| Role | View cases | Analyze | Request evidence | Approve refund | Execute refund | Publish policy | Manage team |
+|---|---|---|---|---|---|---|---|
+| OWNER | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| ADMIN | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| REVIEWER | Yes | Yes | Yes | Yes | Yes, where permitted | No | No |
+| ANALYST | Yes | Yes | Yes | No | No | No | No |
+| VIEWER | Yes | No | No | No | No | No | No |
+
+Enforce these permissions on every backend endpoint.
+
+Do not merely disable buttons in React.
+
+Add tests verifying every role and every sensitive operation.
+
+---
+
+# 8. PAYPAL INTEGRATION — COMPLETE REAL SANDBOX WORKFLOW
+
+Official developer resources:
+
+https://developer.paypal.com/dashboard/
+
+https://developer.paypal.com/dashboard/applications/sandbox
+
+https://developer.paypal.com/tools/sandbox/
+
+https://developer.paypal.com/docs/api/orders/v2/
+
+https://developer.paypal.com/docs/api/payments/v2/
+
+https://developer.paypal.com/docs/api/webhooks/v1/
+
+Use current official documentation and check the current request/response schemas.
+
+Do not invent methods, fields or endpoint behavior.
+
+## 8.1 PayPal Gateway
+
+Keep and refactor the existing `src/server/paypalGateway.ts`.
+
+Create a clean abstraction supporting:
+
+- OAuth authentication.
+- Order creation.
+- Order retrieval.
+- Capture.
+- Capture retrieval.
+- Refund.
+- Refund retrieval.
+- Webhook verification.
+- Safe error categorization.
+
+The gateway must only communicate with the Sandbox API in the current version.
+
+Use:
+
+`https://api-m.sandbox.paypal.com`
+
+Do not enable PayPal Live.
+
+## 8.2 Environment rules
+
+Require:
+
+```env
+PAYPAL_ENVIRONMENT=sandbox
+PAYPAL_LIVE_ENABLED=false
+```
+
+Enforce a backend configuration guard.
+
+An attempt to enable production payment calls should be rejected.
+
+## 8.3 Real Checkout lifecycle
+
+Implement:
+
+Backend creates order.
+
+Frontend loads the official PayPal JavaScript SDK using the public Sandbox Client ID.
+
+Buyer is shown the genuine PayPal approval interface.
+
+Buyer approves payment.
+
+Frontend calls backend capture endpoint.
+
+Backend verifies:
+
+- Correct order ID.
+- Expected merchant environment.
+- Order status.
+- Captured payment status.
+- Capture ID.
+- Amount.
+- Currency.
+- Purchase-unit consistency.
+
+Store the actual PayPal response fields that are necessary for the application.
+
+Do not automatically create synthetic shipping events.
+
+Do not invent carrier tracking details.
+
+If using synthetic order and shipping information, identify it explicitly as demo data.
+
+## 8.4 Currency correctness
+
+Use decimal-safe monetary arithmetic.
+
+Never use floating-point operations for financial calculations.
+
+Make sure the PayPal order's breakdown is consistent with the selected item, tax, shipping and total.
+
+Verify the final amount returned by PayPal rather than assuming that the request amount was captured.
+
+## 8.5 Refund operation
+
+Implement a proper refund service.
+
+Before allowing a refund:
+
+1. User must be authenticated.
+2. User must belong to the merchant tenant.
+3. User must have refund permission.
+4. Case must exist and belong to the merchant.
+5. Case must be in the correct approved state.
+6. Case approval record must exist.
+7. Approval must correspond to the current case and policy version.
+8. Payment capture must be verified.
+9. Amount must be positive.
+10. Currency must match.
+11. Amount must not exceed the remaining verified refundable balance.
+12. Amount must satisfy the merchant's policy-engine result.
+13. An equivalent operation must not already exist.
+14. Database must reserve the operation using a transaction and concurrency controls.
+
+Do not execute refunds directly from AI results.
+
+## 8.6 Idempotency and financial state machine
+
+Use a stable unique refund operation identifier.
+
+Send the appropriate `PayPal-Request-Id`.
+
+Store the identifier durably before the external request.
+
+Do not generate a different key for the same logical refund attempt.
+
+Use:
+
+- Database uniqueness.
+- Row-level locking where applicable.
+- Transactional reservation.
+- Pending/unknown states.
+- Reconciliation.
+- Safe retries.
+
+Separate the local refund operation state from PayPal's returned refund state.
+
+Possible states:
+
+- CREATED
+- RESERVED
+- SUBMITTED
+- PENDING
+- COMPLETED
+- FAILED
+- UNKNOWN
+- RECONCILIATION_REQUIRED
+
+Do not call a pending refund completed.
+
+Do not decrement refundable balances until the corresponding settlement status is confirmed according to PayPal's response and documented lifecycle.
+
+If a request times out after it may have reached PayPal:
+
+- Preserve the same idempotency key.
+- Mark the result unknown.
+- Reconcile it safely.
+- Retry the same logical operation only according to current PayPal idempotency rules.
+- Require manual resolution if the status cannot be established safely.
+
+Never create a second refund just because the browser did not receive the first response.
+
+## 8.7 PayPal webhook integration
+
+Implement webhook receiving and signature verification using PayPal's supported verification API.
+
+Use:
+
+- Webhook ID from the correct environment.
+- Signature verification.
+- Stored event ID.
+- Database uniqueness for duplicate detection.
+- Idempotent handlers.
+- Correct state transitions.
+- Audit events.
+
+Unverified webhook payloads must never modify payment state.
+
+## 8.8 Simulation must be visibly separate
+
+Support two explicit execution modes:
+
+**REAL PAYPAL SANDBOX**
+
+Actual PayPal OAuth and API calls.
+
+**DEMO SIMULATION**
+
+No actual PayPal requests.
+
+In simulation mode:
+
+- All records are clearly labeled demo.
+- IDs are visibly synthetic.
+- No simulated ID may be displayed as a real PayPal transaction identifier.
+- Do not say an actual refund was executed.
+
+In real Sandbox mode, an API failure must never silently produce a simulated success.
+
+---
+
+# 9. GEMINI AI — REAL INVESTIGATION SYSTEM
+
+Preserve the existing Gemini service and refactor it.
+
+Repository:
+
+https://github.com/googleapis/python-genai
+
+For this existing TypeScript application, use Google's official TypeScript Gen AI SDK:
+
+`@google/genai`
+
+Official documentation:
+
+https://ai.google.dev/gemini-api/docs
+
+Verify the currently supported model identifier and account availability.
+
+Do not assume a hardcoded model identifier is valid without checking.
+
+Make the model configurable using:
+
+`GEMINI_MODEL`
+
+## 9.1 AI responsibility
+
+The AI must:
+
+- Understand complaint text.
+- Classify issue category.
+- Extract reported facts.
+- Analyze submitted images.
+- Describe visible characteristics.
+- Identify missing evidence.
+- Highlight inconsistencies.
+- Read relevant policy information supplied by the backend.
+- Draft an investigation summary.
+- Recommend what should happen next.
+- Explain its limitations.
+
+The AI must not:
+
+- Authorize refunds.
+- Change policy rules.
+- Invent PayPal transaction results.
+- Create evidence.
+- Confirm that a customer is lying.
+- Claim damage occurred during transit without proof.
+- Access payment execution credentials.
+- Directly call refund endpoints.
+- Change tenant permissions.
+- Approve a case automatically.
+
+## 9.2 Structured output
+
+Define strict Zod schemas for AI responses.
+
+Use a structure resembling:
+
+```json
+{
+  "issue_type": "damaged_item",
+  "customer_claim": "The item arrived damaged.",
+  "reported_facts": [],
+  "evidence_observations": [],
+  "missing_information": [],
+  "inconsistencies": [],
+  "policy_references": [],
+  "limitations": [
+    "The image does not establish when the damage occurred."
+  ],
+  "recommended_next_step": "request_more_information",
+  "explanation": ""
+}
+```
+
+Validate every field and allowed enum.
+
+Reject malformed outputs.
+
+Do not silently substitute arbitrary strings.
+
+## 9.3 Prompt injection protection
+
+Customer text, uploaded evidence, OCR content, filenames and extracted image content are untrusted.
+
+Separate system instructions from user content.
+
+Never let user input modify the system instruction hierarchy.
+
+Do not enable autonomous payment tools or financial actions.
+
+Limit content size.
+
+Prevent malicious content from controlling code execution or API requests.
+
+The deterministic backend policy engine remains authoritative.
+
+## 9.4 AI fallback
+
+If Gemini is unavailable:
+
+- Preserve the case.
+- Show AI analysis as unavailable or failed.
+- Allow human review.
+- Do not state that a visual image inspection was performed.
+- Do not label deterministic placeholder text as AI findings.
+- Retry with bounded timeouts.
+- Record actual failure status.
+
+The UI must distinguish:
+
+`AI ANALYSIS COMPLETED`
+
+`AI ANALYSIS FAILED`
+
+`DETERMINISTIC DEVELOPMENT FALLBACK`
+
+`MANUAL REVIEW REQUIRED`
+
+---
+
+# 10. EVIDENCE PROCESSING AND SECURITY
+
+Preserve and significantly improve `evidenceProcessor.ts`.
+
+Accept JPEG, PNG and WEBP initially.
+
+Use multipart file uploads rather than unrestricted base64 JSON payloads.
+
+Implement:
+
+1. Request size limit.
+2. File size limit.
+3. File extension allowlist.
+4. Byte-level signature inspection.
+5. Actual image decoder validation.
+6. Pixel and dimension limits.
+7. Safe re-encoding.
+8. Metadata stripping.
+9. Randomized UUID filenames.
+10. SHA-256 fingerprint.
+11. Private file storage.
+12. Authenticated file retrieval.
+13. Customer case-token authorization.
+14. Upload timeouts.
+15. Processing failure handling.
+16. Quarantine or scan-status handling.
+17. Storage cleanup policy.
+18. Persistent evidence metadata.
+
+If malware scanning is unavailable, record `UNSCANNED`.
+
+Do not mark an unscanned file `CLEAN`.
+
+Do not claim comprehensive malware protection merely because a file passes image signature validation.
+
+## Duplicate evidence detection
+
+Keep SHA-256 duplicate detection.
+
+However:
+
+A duplicate exact-file hash is an indication that identical bytes were reused. It is not proof of fraud.
+
+Use a neutral status such as:
+
+`DUPLICATE_EVIDENCE_FINGERPRINT`
+
+Escalate for human review.
+
+Do not automatically accuse customers of fraud.
+
+Check duplicates within the merchant tenant unless an explicitly justified cross-tenant privacy architecture is implemented.
+
+## Private storage
+
+Keep storage behind an interface.
+
+- Local private filesystem for local demonstration.
+- Persistent private object storage adapter for production.
+- Storage path must never be exposed to the browser.
+- No public static URL for private evidence.
+
+Do not trust client-supplied filenames as filesystem paths.
+
+Do not fetch arbitrary evidence URLs supplied by customers.
+
+---
+
+# 11. DETERMINISTIC POLICY ENGINE
+
+Keep the existing `policyEngine.ts` as a base and refactor it.
+
+A policy engine is a deterministic business-rule component, not an AI-generated decision.
+
+Implement versioned merchant policies.
+
+## Required policy fields
+
+- Refund request window.
+- Date basis: transaction or verified delivery.
+- Covered complaint categories.
+- Required evidence by category.
+- Return requirement.
+- Physical inspection thresholds.
+- Partial refund policy.
+- Maximum partial-refund percentage.
+- Mandatory manual review thresholds.
+- Carrier/transit waiting period.
+- Policy version.
+- Publication date.
+- Effective date.
+- Merchant ownership.
+
+## Complaint-specific rules
+
+### Damaged item
+
+Check:
+
+- Customer-reported damage.
+- Product photo received.
+- Packaging photo required if merchant policy says so.
+- Order verification.
+- Return inspection requirement.
+- Policy window.
+- Any available independent delivery information.
+
+AI observations may describe the image but cannot prove when damage occurred.
+
+### Wrong item
+
+Check:
+
+- Order item SKU.
+- Received item label or barcode where supplied.
+- Product photo.
+- Packaging photo where required.
+- Mapping between purchased and received product.
+
+If no authoritative product comparison exists, explicitly state that the comparison is incomplete.
+
+### Item not received
+
+Check:
+
+- Verified transaction.
+- Customer claim.
+- Merchant-provided tracking details.
+- Carrier integration status if implemented.
+- Applicable waiting period.
+- Delivery verification if actually available.
+
+Do not invent GPS coordinates, delivery proof or carrier status.
+
+If no carrier API is integrated, classify the evidence as merchant-provided or customer-reported and send unresolved cases to manual review.
+
+## Outcome states
+
+- `ELIGIBLE_FOR_MERCHANT_REVIEW`
+- `MORE_INFORMATION_REQUIRED`
+- `INELIGIBLE_UNDER_CONFIGURED_POLICY`
+- `MANUAL_REVIEW_REQUIRED`
+
+Never allow the policy engine to execute a payment.
+
+## Monetary handling
+
+Use decimal-safe arithmetic or integer minor units.
+
+Never use JavaScript floating-point amounts for refunds.
+
+Correctly handle:
+
+- Zero values.
+- Invalid inputs.
+- Currency-specific decimals.
+- Partial refunds.
+- Existing refunded amount.
+- Remaining refundable balance.
+- Threshold boundaries.
+
+Never rely on `parseFloat()` or implicit truthiness as full policy validation.
+
+## Policy history
+
+When a case is created or evaluated, store its relevant immutable policy version.
+
+A later policy change must not silently rewrite the historic basis of a previous case decision.
+
+Record policy evaluation inputs and rule outcomes.
+
+---
+
+# 12. CASE STATE MACHINE
+
+Create an explicit validated case state machine.
+
+Possible states:
+
+```text
+NEW
+AWAITING_EVIDENCE
+ANALYZING
+ANALYSIS_FAILED
+READY_FOR_REVIEW
+NEEDS_MORE_INFORMATION
+ESCALATED
+APPROVED_PENDING_REFUND
+REFUND_SUBMITTED
+REFUND_PENDING
+REFUND_UNKNOWN
+REFUNDED
+REFUND_FAILED
+REJECTED
+CLOSED
+```
+
+Not every transition should be allowed.
+
+Examples:
+
+- A new case can be analyzed.
+- A case awaiting evidence cannot be refunded.
+- A failed investigation can be manually reviewed, but cannot silently become AI-approved.
+- Only a valid merchant approval can initiate a refund reservation.
+- A completed refund cannot return to a new-refund state.
+- An ambiguous refund must be reconciled.
+- A failed attempt may only be retried safely after determining the payment outcome.
+
+All transitions must be controlled by backend domain logic.
+
+Frontend state must never be authoritative.
+
+---
+
+# 13. CUSTOMER PORTAL
+
+Preserve the current CustomerPortalView and upgrade it.
+
+The customer receives a private case link.
+
+Generate access tokens using cryptographically secure random bytes.
+
+Store only a hash of the token.
+
+Implement:
+
+- Expiry.
+- Revocation.
+- Case-specific authorization.
+- Rate limiting.
+- Input validation.
+- Upload limits.
+- CSRF protection where applicable.
+- Accurate upload failure feedback.
+- Safe status responses.
+
+Customers should be able to:
+
+- View limited order information.
+- Describe the complaint.
+- Select complaint category.
+- Upload relevant evidence.
+- Request refund or another supported resolution.
+- Submit follow-up information when requested.
+- See a simple case status.
+
+Customers must not see:
+
+- Merchant internal notes.
+- Other customer cases.
+- Internal fraud flags.
+- Private AI system instructions.
+- Merchant-only policy configuration.
+- Private evidence belonging to another case.
+- Internal payment credentials.
+
+Make this experience excellent on mobile devices.
+
+---
+
+# 14. CASE DETAIL — THE MOST IMPORTANT PRODUCT SCREEN
+
+The case investigation interface must become the central differentiating feature.
+
+Design a professional investigative workspace.
+
+Display these sections:
+
+### Customer-reported information
+
+Show the original customer text without changing its meaning.
+
+Label it:
+
+`CUSTOMER REPORTED`
+
+### Verified PayPal details
+
+Show only fields returned or verified through PayPal.
+
+Label them:
+
+`PAYPAL VERIFIED`
+
+### Merchant information
+
+Display tracking information and product information provided by the merchant.
+
+Label them:
+
+`MERCHANT PROVIDED`
+
+### Evidence received
+
+Show real evidence files.
+
+Display:
+
+- Filename.
+- MIME type.
+- Upload date.
+- Size.
+- Evidence category.
+- Hash identifier in an expandable technical section.
+- Scan status.
+- Secure image preview.
+
+Label them:
+
+`EVIDENCE RECEIVED`
+
+### AI observations
+
+Display the actual Gemini-generated findings.
+
+Label them:
+
+`AI OBSERVATION`
+
+Show limitations.
+
+Do not generate a misleading confidence percentage.
+
+### Policy assessment
+
+Display:
+
+- Policy version.
+- Applicable rule.
+- Passed or failed result.
+- Missing requirement.
+- Eligible amount, if applicable.
+- Explanation.
+
+Label them:
+
+`POLICY RULE`
+
+### Merchant decision
+
+Provide:
+
+- Approve refund.
+- Reject.
+- Request more evidence.
+- Escalate.
+
+The decision must be recorded on the backend.
+
+A refund confirmation must require explicit, informed merchant authorization.
+
+Show the exact amount, currency, capture reference and applicable policy decision.
+
+The merchant must always be able to distinguish a recommendation from a payment action.
+
+---
+
+# 15. NEW PRODUCT FUNCTIONALITY
+
+Extend the existing application to include the following features where appropriate.
+
+## 15.1 Merchant onboarding
+
+Build a genuine onboarding journey:
+
+1. Merchant creates account.
+2. Business name and display name.
+3. Business profile.
+4. Preferred currency and timezone.
+5. Team owner setup.
+6. PayPal Sandbox connection instructions.
+7. Default refund policy setup.
+8. Dashboard introduction.
+
+Store merchant profile details.
+
+Store user role through tenant membership, not as a freely editable profile preference.
+
+## 15.2 Dashboard
+
+Upgrade the current dashboard with dynamic database-driven data.
+
+Include:
+
+- Total active cases.
+- Waiting for evidence.
+- Ready for review.
+- Escalated cases.
+- Refunds pending.
+- Refunds completed.
+- Total verified refunded volume.
+- Recent activity.
+- Case category breakdown.
+- Case aging.
+- Investigation queue.
+
+Only calculate metrics from real stored records.
+
+Mark seeded demonstration data.
+
+Do not fabricate activity trends.
+
+## 15.3 Case inbox
+
+Improve:
+
+- Search.
+- Filters.
+- Sorting.
+- Pagination.
+- Case priority.
+- Case category.
+- Order reference.
+- Merchant assignment.
+- Case status.
+- Review date.
+- Refund state.
+
+Use server-side pagination after implementing persistent database queries.
+
+## 15.4 Policy management
+
+Create a better policy editor.
+
+Allow merchant owners/admins to:
+
+- View current policy.
+- Create policy draft.
+- Validate policy rules.
+- Publish a new immutable version.
+- Inspect previous policy versions.
+- See how a rule affects a test case.
+
+Provide a policy simulation mode that evaluates synthetic test data without executing a refund.
+
+## 15.5 PayPal integration settings
+
+Show:
+
+- Sandbox environment.
+- Connected/not connected status.
+- OAuth verification status.
+- Last verified timestamp.
+- Masked Client ID.
+- Webhook configuration status.
+- Recent sandbox orders.
+- Refund history.
+- Integration diagnostics.
+
+Never display secrets.
+
+Do not call the service connected simply because strings are present in environment variables. Verify OAuth where possible.
+
+## 15.6 Audit history
+
+Implement a useful audit timeline.
+
+Include:
+
+- Case creation.
+- Customer submission.
+- Evidence received.
+- AI processing.
+- Policy evaluation.
+- Merchant decision.
+- Approval.
+- Refund request.
+- PayPal response.
+- Status change.
+
+Store events durably.
+
+Restrict update and deletion of audit records.
+
+Where feasible, use a per-case event hash chain to make tampering detectable. Do not claim absolute immutability simply because an append-only UI is used.
+
+## 15.7 Merchant team management
+
+Allow owners/admins to:
+
+- Invite members.
+- Assign roles.
+- Revoke invitations.
+- Suspend memberships.
+- See audit history of role changes.
+
+Do not allow users to elevate their own roles.
+
+---
+
+# 16. UI/UX — TRANSFORM THE EXISTING DESIGN INTO A PREMIUM FINTECH PRODUCT
+
+The existing interface is useful, but it is too basic for the product we intend to build.
+
+Upgrade it substantially without losing its existing visual direction.
+
+The new interface should look like a credible professional fintech operations platform.
+
+It should have the quality of a well-designed commercial SaaS product.
+
+## 16.1 Brand and visual identity
+
+Keep the brand name:
+
+**FairResolve**
+
+Create an elegant, original visual identity.
+
+Use a sophisticated visual direction:
+
+- Deep navy.
+- Soft white.
+- Light neutral surfaces.
+- Controlled PayPal-blue-inspired accent color.
+- Subtle teal or green for verified/success statuses.
+- Amber for pending/review.
+- Red only for important errors.
+- Strong typography.
+- Spacious layouts.
+- Clear navigation.
+- Consistent spacing and alignment.
+- Professional card and table treatment.
+- Subtle shadows.
+- Carefully designed empty states.
+
+Do not reproduce PayPal's website pixel by pixel.
+
+FairResolve is an independent application that integrates with PayPal. It must not pretend to be an official PayPal product.
+
+Use clear language such as:
+
+`Independent merchant resolution platform · PayPal Sandbox integration`
+
+## 16.2 Application shell
+
+Create a premium dashboard shell.
+
+Desktop:
+
+- Persistent left sidebar.
+- Compact FairResolve logo and identity.
+- Overview navigation.
+- Cases.
+- Transactions.
+- Policies.
+- Integrations.
+- Audit.
+- Team.
+- Settings.
+- Top toolbar with search.
+- Environment status.
+- User profile.
+- Notification area.
+
+Use a clear main content area with a consistent maximum width.
+
+Mobile:
+
+- Responsive navigation.
+- Well-structured cards.
+- Mobile-first customer portal.
+- No horizontal overflow.
+- No tiny table text.
+- Accessible touch targets.
+
+## 16.3 Dashboard design
+
+Make the dashboard visually richer but not cluttered.
+
+The opening area should provide a clear welcome, merchant identity and operational summary.
+
+Use a well-designed metrics row.
+
+Use a proper case queue with priorities and actionable statuses.
+
+Use an activity chart only if actual stored data supports it.
+
+Use clear integration-status cards.
+
+Avoid decorative graphs containing fabricated numbers.
+
+## 16.4 Case investigation workspace
+
+Create an excellent multi-panel layout.
+
+Possible desktop organization:
+
+Left panel:
+- Case identity.
+- Customer information.
+- Complaint.
+- Order reference.
+- Status.
+- Timeline.
+
+Center:
+- Evidence gallery.
+- Image preview.
+- AI observations.
+- Missing information.
+- Inconsistencies.
+- Investigation explanation.
+
+Right panel:
+- PayPal transaction.
+- Policy evaluation.
+- Eligible amount.
+- Merchant decision.
+- Refund action.
+
+Use responsive stacking on smaller screens.
+
+Important information should remain visible.
+
+No unnecessary scroll traps.
+
+## 16.5 Refund confirmation
+
+Design this as a serious financial action.
+
+Display:
+
+- Merchant name.
+- Customer reference.
+- PayPal capture reference.
+- Refund amount.
+- Currency.
+- Previous refunded amount.
+- Remaining balance.
+- Applicable policy.
+- Explicit final authorization.
+
+Use clear success, pending and failure screens.
+
+Never show success optimistically before the API confirms it.
+
+## 16.6 Evidence viewer
+
+Include:
+
+- Image preview.
+- Zoom.
+- Full-screen view.
+- Uploaded-file details.
+- Scan status.
+- Duplicate hash indicator.
+- Source category.
+- AI observation panel.
+- Warning that visual observations cannot prove the time or cause of damage.
+
+## 16.7 UI quality requirements
+
+- All buttons work.
+- No fake buttons.
+- No dead links.
+- No placeholder forms.
+- No misleading loading state.
+- No infinite processing animation.
+- All routes work.
+- All errors are explained.
+- All forms validate.
+- All statuses reflect actual backend state.
+- Consistent design tokens.
+- Keyboard accessible.
+- Visible focus states.
+- WCAG 2.2 AA-oriented design.
+- Proper labels and semantic structure.
+- Responsive at common desktop, tablet and phone sizes.
+
+Use restrained motion only where it improves interaction.
+
+Do not use excessive gradients, generic AI-generated graphics or emojis in the main operational interface.
+
+Do not add decoration at the cost of performance.
+
+Create and maintain a `DESIGN.md` file documenting design tokens and component patterns.
+
+If a design tool such as Google Stitch is available, use it for design exploration and screen references, but implement the final application in the existing React codebase.
+
+Do not stop development because a design tool is unavailable.
+
+---
+
+# 17. SECURITY ENGINEERING — ASSUME HOSTILE USERS
+
+The product accepts customer text, uploaded files and payment instructions. Treat all those inputs as untrusted.
+
+Implement and test defenses for:
+
+- Broken object-level authorization.
+- Broken authentication.
+- Role escalation.
+- SQL injection.
+- XSS.
+- CSRF.
+- SSRF.
+- Path traversal.
+- Malicious file uploads.
+- Oversized image processing.
+- Prompt injection.
+- Replay attacks.
+- Duplicate requests.
+- Payment race conditions.
+- Webhook forgery.
+- Rate-limit abuse.
+- Denial of service.
+- Sensitive information leakage.
+- Session theft.
+- Account enumeration.
+- Insecure direct object references.
+
+Use:
+
+- Helmet security headers.
+- Strict CORS allowlist.
+- CSRF protection.
+- Rate limiting.
+- Strong session controls.
+- Zod validation.
+- ORM parameterized operations.
+- Request-size limits.
+- Safe logging.
+- Secure cookies.
+- Secret management.
+- Dependency auditing.
+- Secret scanning.
+
+Do not accept arbitrary external URLs for server-side fetching.
+
+Do not log complete credentials, cookies, authorization headers or private images.
+
+Protect the evidence download endpoint.
+
+Do not return raw stack traces to external users.
+
+Do not expose sensitive information through error responses.
+
+## Operational security
+
+Configure:
+
+- Structured logs.
+- Error boundaries.
+- Request IDs.
+- Correlation IDs for refund operations.
+- Health endpoint.
+- Readiness endpoint.
+- Bounded request timeouts.
+- Controlled retry policies.
+- Worker retry limits.
+- Database connection pooling.
+- Graceful shutdown.
+
+Never claim the application has zero vulnerabilities.
+
+State clearly that independent penetration testing and production readiness review remain necessary before real-money commercial deployment.
+
+---
+
+# 18. BACKGROUND WORKER AND OUTBOX
+
+Create a proper durable background worker.
+
+Required jobs:
+
+- AI investigation.
+- Image processing.
+- Evidence scanning.
+- Payment refund execution.
+- Refund reconciliation.
+- Webhook processing.
+- Token cleanup.
+- Expired invitation cleanup.
+
+Use a PostgreSQL outbox.
+
+The API should create jobs transactionally.
+
+The worker should claim jobs safely.
+
+Implement:
+
+- Job ID.
+- Job type.
+- Payload.
+- Status.
+- Attempts.
+- Next retry time.
+- Last error.
+- Completion time.
+- Idempotency key.
+- Correlation ID.
+
+Use bounded exponential backoff for suitable retryable operations.
+
+Do not blindly retry financial operations.
+
+Workers must be restart-safe.
+
+The application must not lose critical payment jobs because a process restarted.
+
+---
+
+# 19. API DESIGN
+
+Create clear REST endpoints.
+
+Suggested API:
+
+### Authentication
+
+```text
+POST /api/v1/auth/register
+POST /api/v1/auth/login
+POST /api/v1/auth/logout
+GET  /api/v1/auth/me
+POST /api/v1/auth/switch-tenant
+```
+
+Switching tenant must verify membership.
+
+### Merchant
+
+```text
+GET  /api/v1/merchant/profile
+PUT  /api/v1/merchant/profile
+GET  /api/v1/merchant/team
+POST /api/v1/merchant/invitations
+POST /api/v1/merchant/invitations/accept
+```
+
+### Cases
+
+```text
+GET  /api/v1/cases
+POST /api/v1/cases
+GET  /api/v1/cases/:id
+POST /api/v1/cases/:id/analyze
+POST /api/v1/cases/:id/review
+POST /api/v1/cases/:id/request-information
+GET  /api/v1/cases/:id/events
+```
+
+### Customer portal
+
+```text
+GET  /api/v1/customer/cases/:token
+POST /api/v1/customer/cases/:token/submit
+POST /api/v1/customer/cases/:token/evidence
+GET  /api/v1/customer/cases/:token/status
+```
+
+Customer endpoints must be scoped to the secure case token.
+
+### Evidence
+
+```text
+POST /api/v1/cases/:id/evidence
+GET  /api/v1/evidence/:id
+DELETE /api/v1/evidence/:id
+```
+
+Deletion must respect audit and retention policy. Do not remove evidence needed for an active or completed financial investigation.
+
+### Policies
+
+```text
+GET  /api/v1/policies
+POST /api/v1/policies
+GET  /api/v1/policies/:id
+POST /api/v1/policies/:id/publish
+GET  /api/v1/policies/:id/versions
+POST /api/v1/policies/evaluate-demo
+```
+
+### PayPal checkout
+
+```text
+POST /api/v1/paypal/orders
+GET  /api/v1/paypal/orders/:id
+POST /api/v1/paypal/orders/:id/capture
+GET  /api/v1/paypal/status
+POST /api/v1/paypal/verify
+```
+
+### Refunds
+
+```text
+POST /api/v1/cases/:id/approve-refund
+POST /api/v1/cases/:id/refunds
+GET  /api/v1/refunds/:id
+GET  /api/v1/cases/:id/refunds
+```
+
+### Webhooks
+
+```text
+POST /api/v1/webhooks/paypal
+```
+
+### Operational endpoints
+
+```text
+GET /health/live
+GET /health/ready
+```
+
+These are design suggestions. Check existing routes and maintain backward compatibility only where useful.
+
+Validate all inputs and outputs.
+
+Use consistent error response structures.
+
+Use appropriate HTTP status codes.
+
+Do not return private database objects directly.
+
+---
+
+# 20. SEED DATA AND DEMO EXPERIENCES
+
+Preserve the existing fictional merchant and seeded scenarios.
+
+The current demo data includes:
+
+- Damaged item.
+- Wrong item.
+- Item not received.
+- Late complaint.
+- Partial refund.
+- Duplicate evidence.
+
+Do not delete those scenarios.
+
+Convert them into proper database seeds.
+
+Mark every seeded record clearly:
+
+`DEMO DATA`
+
+The existing sample merchant is:
+
+`Apex Audio & Gear`
+
+It is a fictional demo merchant.
+
+Use fictional customer information.
+
+Do not represent synthetic order IDs, tracking numbers or evidence files as real PayPal or carrier data.
+
+Create a controlled demo-data seed script.
+
+Seed only in permitted environments.
+
+Never run destructive seed operations against an existing production database.
+
+The application should remain fully usable even when there are no seeded demo cases.
+
+Add useful empty states.
+
+---
+
+# 21. TESTING — DO NOT CLAIM COMPLETION WITHOUT EVIDENCE
+
+Create tests for every major module.
+
+## Unit tests
+
+- Case state machine.
+- Policy evaluation.
+- Refund calculations.
+- Currency handling.
+- Evidence validation.
+- AI schemas.
+- Session logic.
+- Permissions.
+- Idempotency logic.
+- Audit event generation.
+
+## API tests
+
+- Merchant login.
+- Invalid login.
+- Session expiry.
+- Tenant isolation.
+- Case listing.
+- Case detail.
+- Customer portal.
+- Evidence upload.
+- Evidence authorization.
+- Policy publication.
+- Refund authorization.
+- Unauthorized refund attempts.
+- Webhook processing.
+
+## PayPal tests
+
+Using mocked API responses:
+
+- OAuth success.
+- OAuth rejection.
+- Create order.
+- Buyer approval state.
+- Capture success.
+- Capture rejection.
+- Capture mismatch.
+- Refund success.
+- Partial refund.
+- Pending refund.
+- Failed refund.
+- Timeout.
+- Idempotent retry.
+- Duplicate request.
+
+Using real Sandbox credentials:
+
+- Genuine order creation.
+- Buyer approval.
+- Genuine capture.
+- Genuine refund.
+- Actual PayPal refund identifier.
+- Refund retrieval or verified status.
+- Proper final local state.
+
+## AI tests
+
+- Valid structured output.
+- Invalid output.
+- Missing fields.
+- Invalid category.
+- Prompt injection.
+- Provider timeout.
+- Provider quota exceeded.
+- Image analysis.
+- Empty image input.
+- AI fallback.
+- No false visual analysis claims.
+
+## Security tests
+
+- User A cannot access User B's tenant.
+- Viewer cannot approve a refund.
+- Analyst cannot execute payment.
+- Customer token cannot access another case.
+- Expired case token is rejected.
+- Unauthorized image retrieval is rejected.
+- Malicious files are rejected.
+- Oversized uploads are rejected.
+- Simultaneous refund requests are controlled.
+- Replayed webhook events do not repeat processing.
+- Credentials are not returned by any API.
+- AI cannot execute a refund.
+
+## Browser tests
+
+Use Playwright to test:
+
+1. Login.
+2. Dashboard.
+3. Case inbox.
+4. Case detail.
+5. Customer portal.
+6. Evidence upload.
+7. AI investigation.
+8. Policy assessment.
+9. Merchant review.
+10. PayPal refund confirmation.
+11. Audit history.
+12. Error handling.
+13. Mobile layout.
+
+No tests should depend on genuine customer personal information.
+
+---
+
+# 22. DEPLOYMENT AND ENVIRONMENT CONFIGURATION
+
+Implement clean deployment support.
+
+Use Docker Compose for a reproducible setup:
+
+```text
+api
+frontend
+postgres
+worker
+```
+
+The API may serve the built frontend in production or use a same-origin reverse proxy.
+
+Use persistent volumes for local PostgreSQL and private local storage.
+
+Create proper health checks.
+
+Implement migrations.
+
+Support graceful startup and shutdown.
+
+Use appropriate environment variables.
+
+Required initial example:
+
+```env
+NODE_ENV=development
+PORT=3000
+
+APP_SECRET_KEY=
+SESSION_SECRET=
+CSRF_SECRET=
+
+DATABASE_URL=
+
+PAYPAL_ENVIRONMENT=sandbox
+PAYPAL_CLIENT_ID=
+PAYPAL_CLIENT_SECRET=
+PAYPAL_WEBHOOK_ID=
+PAYPAL_LIVE_ENABLED=false
+
+GEMINI_API_KEY=
+GEMINI_MODEL=
+
+STORAGE_PROVIDER=local
+LOCAL_STORAGE_PATH=./private_uploads
+
+PUBLIC_APP_URL=http://localhost:3000
+CORS_ORIGINS=http://localhost:3000
+```
+
+Adjust environment names only if the application uses a consistent documented alternative.
+
+Never commit actual credentials.
+
+Never place PayPal Client Secret or Gemini API key in frontend environment variables.
+
+Use the Google AI Studio secrets environment where available.
+
+The public PayPal Client ID may be exposed only where the official JavaScript SDK requires it. Never expose the Secret.
+
+Local storage is acceptable for the hackathon demonstration. Production documentation must clearly explain that persistent private object storage is needed when deploying on infrastructure with ephemeral local disks.
+
+Do not assume a particular deployment provider's free tier or storage guarantees without checking its current documentation.
+
+Do not enable paid resources without explicit user approval.
+
+---
+
+# 23. DOCUMENTATION AND PROJECT TRANSPARENCY
+
+Update these files based on the actual implementation:
+
+`README.md`
+
+Include:
+
+- Product overview.
+- Architecture.
+- Screenshots.
+- Main features.
+- Tech stack.
+- Setup instructions.
+- Environment variables.
+- Database initialization.
+- Demo mode.
+- PayPal Sandbox setup.
+- Gemini setup.
+- Running commands.
+- Testing commands.
+- Security limitations.
+- Deployment instructions.
+- AI development tool disclosure.
+
+`IMPLEMENTATION_STATUS.md`
+
+Report actual statuses:
+
+- Implemented and tested.
+- Implemented but not externally verified.
+- Partially implemented.
+- Not implemented.
+- Blocked by credentials.
+- External approval required.
+
+`docs/THREAT_MODEL.md`
+
+Update it based on the real implemented architecture.
+
+Do not claim that unimplemented mitigations exist.
+
+`docs/PAYMENT_FLOW.md`
+
+Explain the order, buyer approval, capture, merchant approval, refund, webhook and reconciliation sequence.
+
+`docs/AI_SAFETY.md`
+
+Explain what the AI can and cannot do.
+
+`THIRD_PARTY_NOTICES.md`
+
+List used external libraries and applicable licenses.
+
+Root repository must include an appropriate open-source license. Use MIT for original project code only if consistent with the owner's decision, and preserve third-party licenses for reused components.
+
+---
+
+# 24. VISUAL FINISHING AND QUALITY BAR
+
+The result must not look like a rough AI-generated admin template.
+
+The final interface must be coherent and polished.
+
+Perform a complete visual review.
+
+Fix:
+
+- Inconsistent padding.
+- Misaligned cards.
+- Overcrowded navigation.
+- Bad table spacing.
+- Tiny typography.
+- Unnecessary visual effects.
+- Inconsistent button styles.
+- Unclear status badges.
+- Weak mobile navigation.
+- Poor visual hierarchy.
+- Unhelpful empty screens.
+- Misleading success colors.
+- Ambiguous payment status.
+- Placeholder icons.
+- Broken responsive grids.
+
+Improve the Case Detail page especially.
+
+Create a clear information hierarchy:
+
+1. Case identity.
+2. Customer claim.
+3. Verified order data.
+4. Evidence.
+5. AI observations.
+6. Policy result.
+7. Human decision.
+8. Payment operation.
+9. Audit timeline.
+
+A merchant must be able to understand the situation within a few seconds.
+
+Use consistent labels to communicate source of information.
+
+Do not overload the interface with unnecessary metrics.
+
+Use a professional fintech visual language.
+
+Make the entire product feel like a real commercial SaaS product rather than a hackathon demo.
+
+---
+
+# 25. STRICT ENGINEERING RULES
+
+These are absolute.
+
+1. Preserve existing useful code.
+2. Modify the existing repository, not an unrelated project.
+3. Never overwrite user changes.
+4. Never expose API credentials.
+5. Never enable PayPal Live.
+6. Never fake PayPal order or refund IDs in real Sandbox mode.
+7. Never let AI approve or execute payments.
+8. Never trust frontend authorization.
+9. Never trust customer-supplied amounts.
+10. Never expose evidence through a public unauthenticated route.
+11. Never treat exact image duplication as proof of fraud.
+12. Never mark an AI failure as successful analysis.
+13. Never mark pending PayPal refunds as completed.
+14. Never retry ambiguous payments with a new idempotency key.
+15. Never use in-memory Maps as the authoritative database.
+16. Never fabricate tracking, delivery or carrier status.
+17. Never silently swallow upload errors.
+18. Never allow tenant access based only on an ID supplied by the client.
+19. Never label unscanned files clean.
+20. Never claim that automated scans prove zero vulnerabilities.
+21. Never install paid APIs or services without approval.
+22. Never leave important controls as placeholders.
+23. Never create endless loading states.
+24. Never report a test as passed unless it actually ran.
+25. Never claim that a deployment succeeded without checking it.
+
+---
+
+# 26. EXECUTION STRATEGY — KEEP WORKING UNTIL COMPLETE
+
+Do not stop after producing a plan.
+
+Execute the project in this order:
+
+**Stage 1:** Inspect baseline, preserve code and establish the refactor branch.
+
+**Stage 2:** Fix authentication and tenant isolation.
+
+**Stage 3:** Implement PostgreSQL and migrations.
+
+**Stage 4:** Correct the PayPal order and capture workflow.
+
+**Stage 5:** Correct refund authorization, idempotency and reconciliation.
+
+**Stage 6:** Secure the evidence pipeline and customer portal.
+
+**Stage 7:** Harden Gemini integration and structured investigation output.
+
+**Stage 8:** Fix and test the policy engine.
+
+**Stage 9:** Implement durable worker and webhooks.
+
+**Stage 10:** Connect all existing frontend screens to the new backend.
+
+**Stage 11:** Improve the UI to the premium fintech product standard.
+
+**Stage 12:** Build automated tests and run all available security and dependency checks.
+
+**Stage 13:** Complete Docker and deployment support.
+
+**Stage 14:** Update documentation and implementation status.
+
+**Stage 15:** Perform final end-to-end verification and produce a detailed engineering report.
+
+When one stage is complete, move to the next without asking unnecessary questions.
+
+If a missing API credential blocks a real external test, ask the user for that credential while continuing other work.
+
+If an API provider is unavailable, report that honestly.
+
+If a security issue cannot be fixed safely within the available environment, report it as a blocker instead of pretending it is solved.
+
+---
+
+# 27. FINAL DEFINITION OF DONE
+
+FairResolve is ready for hackathon submission only when the following continuous flow works:
+
+1. Merchant logs in with a real authenticated account.
+2. Merchant belongs to the correct tenant.
+3. Merchant opens the dashboard.
+4. A genuine PayPal Sandbox order is created.
+5. Buyer approves the order through PayPal.
+6. Backend captures and verifies the actual payment.
+7. Customer receives a secure case link.
+8. Customer submits a complaint.
+9. Customer uploads valid evidence.
+10. Backend processes and stores evidence securely.
+11. Gemini produces a validated structured investigation, if configured.
+12. Policy engine evaluates the case independently.
+13. Merchant sees evidence provenance, limitations and policy reasoning.
+14. Merchant explicitly approves an eligible refund.
+15. Backend verifies approval and available balance.
+16. Refund operation is reserved transactionally.
+17. PayPal Sandbox receives the actual refund request.
+18. Actual PayPal refund response is recorded.
+19. Refund status is reconciled correctly.
+20. Merchant sees the real final payment state.
+21. Audit events are stored.
+22. Application remains usable through expected external errors.
+23. Automated tests pass.
+24. Clean setup and deployment instructions work.
+
+Do not claim real PayPal functionality has been verified until a genuine Sandbox transaction has completed.
+
+Do not claim production-ready security merely because the code includes security features.
+
+A real commercial release will still need independent penetration testing, operational validation, privacy/legal review and appropriate PayPal production onboarding.
+
+---
+
+# 28. FINAL OUTPUT REQUIRED FROM YOU
+
+At the end of the transformation, provide:
+
+1. Executive summary of what was changed.
+2. Existing components preserved.
+3. Files modified.
+4. New files created.
+5. Database architecture.
+6. Authentication implementation.
+7. Tenant isolation implementation.
+8. Gemini integration status.
+9. PayPal Sandbox integration status.
+10. Evidence security implementation.
+11. Refund reliability and reconciliation implementation.
+12. UI/UX improvements.
+13. Test commands executed.
+14. Exact results of the test commands.
+15. Security scan results.
+16. Deployment instructions.
+17. Required environment variables.
+18. External credentials still missing.
+19. Known limitations.
+20. Remaining blockers.
+
+Provide exact commands to start the application and run all tests.
+
+Give a separate list of all functionality that is genuinely implemented but not externally verified.
+
+Do not inflate completion percentages.
+
+Do not mark mock functionality as implemented PayPal functionality.
+
+Do not hide unresolved critical security issues.
+
+---
+
+# THE PRODUCT VISION
+
+FairResolve must become a sophisticated merchant dispute-resolution platform.
+
+It should combine:
+
+- Reliable payment integration.
+- Evidence-aware investigation.
+- AI-assisted structured reasoning.
+- Deterministic policy evaluation.
+- Human authorization.
+- Secure refund execution.
+- Durable auditability.
+- Premium fintech UX.
+- Reliable failure handling.
+
+It should look like a product that a real online merchant could understand and operate.
+
+It should be designed to evolve beyond a hackathon prototype.
+
+Preserve the existing project, improve its strongest parts, replace weak infrastructure, implement missing features and validate every important workflow.
+
+**Do not restart from scratch. Do not stop at the planning stage. Work directly on the existing FairResolve application and execute the complete transformation now.**

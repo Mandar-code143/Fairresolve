@@ -21,6 +21,7 @@ import { Case, Order, RefundPolicy, User } from '../types';
 import { CaseStatusBadge, PolicyOutcomeBadge, SourceBadge } from './Badges';
 import { EvidenceModal } from './EvidenceModal';
 import { RefundModal } from './RefundModal';
+import { apiFetch } from '../utils/api';
 
 interface CaseDetailViewProps {
   caseData: Case;
@@ -57,7 +58,7 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
   const handleReanalyze = async () => {
     setIsAnalyzing(true);
     try {
-      const res = await fetch(`/api/v1/cases/${caseData.id}/re-analyze`, {
+      const res = await apiFetch(`/api/v1/cases/${caseData.id}/re-analyze`, {
         method: 'POST',
       });
       const data = await res.json();
@@ -74,9 +75,8 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
   // Merchant status decision
   const handleReviewAction = async (decision: 'APPROVE' | 'REJECT' | 'REQUEST_INFO' | 'ESCALATE') => {
     try {
-      const res = await fetch(`/api/v1/cases/${caseData.id}/review`, {
+      const res = await apiFetch(`/api/v1/cases/${caseData.id}/review`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ decision, notes: actionNotes }),
       });
       const data = await res.json();
@@ -115,9 +115,8 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
     reader.onload = async () => {
       try {
         const base64 = reader.result as string;
-        const res = await fetch('/api/v1/evidence/upload', {
+        const res = await apiFetch('/api/v1/evidence/upload', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             caseId: caseData.id,
             filename: file.name,
@@ -130,7 +129,7 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
         const data = await res.json();
         if (res.ok) {
           // Re-fetch updated case
-          const caseRes = await fetch(`/api/v1/cases/${caseData.id}`);
+          const caseRes = await apiFetch(`/api/v1/cases/${caseData.id}`);
           const caseDataRes = await caseRes.json();
           onUpdateCase(caseDataRes.case, caseDataRes.order);
         } else {

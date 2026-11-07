@@ -10,6 +10,7 @@ import {
   Package,
 } from 'lucide-react';
 import { Order } from '../types';
+import { apiFetch } from '../utils/api';
 
 interface CheckoutSimulatorViewProps {
   onOrderCreated: (newOrder: Order, customerLink: string) => void;
@@ -67,9 +68,8 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
     setResult(null);
 
     try {
-      const res = await fetch('/api/v1/orders/checkout-demo', {
+      const res = await apiFetch('/api/v1/orders/checkout-demo', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           productType: selectedProduct,
           buyerName,

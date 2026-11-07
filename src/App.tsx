@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
 import { DashboardView } from './components/DashboardView';
 import { CaseInboxView } from './components/CaseInboxView';
@@ -14,7 +14,10 @@ import { PolicyManagerView } from './components/PolicyManagerView';
 import { PayPalIntegrationView } from './components/PayPalIntegrationView';
 import { AuditLedgerView } from './components/AuditLedgerView';
 import { DocsView } from './components/DocsView';
+import { TeamManagerView } from './components/TeamManagerView';
+import { LoginModal } from './components/LoginModal';
 import { Case, Order, PayPalGatewayStatus, RefundPolicy, User, UserRole } from './types';
+import { apiFetch, getAuthToken, setAuthToken, removeAuthToken } from './utils/api';
 import { Loader2 } from 'lucide-react';
 
 export default function App() {
@@ -35,55 +38,121 @@ export default function App() {
   });
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
 
-  // Initial Data Fetch
-  const fetchData = async () => {
+  // Core Data Fetch using authenticated apiFetch
+  const fetchData = useCallback(async () => {
     try {
       const [casesRes, ordersRes, policiesRes, statusRes, authRes] = await Promise.all([
-        fetch('/api/v1/cases'),
-        fetch('/api/v1/orders'),
-        fetch('/api/v1/policies'),
-        fetch('/api/v1/paypal/status'),
-        fetch('/api/v1/auth/me'),
+        apiFetch('/api/v1/cases'),
+        apiFetch('/api/v1/orders'),
+        apiFetch('/api/v1/policies'),
+        apiFetch('/api/v1/paypal/status'),
+        apiFetch('/api/v1/auth/me'),
       ]);
 
-      const casesData = await casesRes.json();
-      const ordersData = await ordersRes.json();
-      const policiesData = await policiesRes.json();
-      const statusData = await statusRes.json();
-      const authData = await authRes.json();
+      if (authRes.ok) {
+        const authData = await authRes.json();
+        setCurrentUser(authData.user || null);
+      }
 
-      setCases(casesData.cases || []);
-      setOrders(ordersData.orders || []);
-      setPolicies(policiesData.policies || []);
-      setGatewayStatus(statusData);
-      setCurrentUser(authData.user || null);
+      if (casesRes.ok) {
+        const casesData = await casesRes.json();
+        setCases(casesData.cases || []);
+      }
+
+      if (ordersRes.ok) {
+        const ordersData = await ordersRes.json();
+        setOrders(ordersData.orders || []);
+      }
+
+      if (policiesRes.ok) {
+        const policiesData = await policiesRes.json();
+        setPolicies(policiesData.policies || []);
+      }
+
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        setGatewayStatus(statusData);
+      }
     } catch (err) {
-      console.error('Initial fetch error:', err);
+      console.error('Data fetch error:', err);
     } finally {
       setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    fetchData();
   }, []);
 
-  // Switch role for RBAC testing
-  const handleSwitchRole = async (role: UserRole) => {
+  // Initialize session: auto-bootstrap demo session if no token stored
+  useEffect(() => {
+    const initAuth = async () => {
+      let token = getAuthToken();
+      if (!token) {
+        try {
+          // Auto login as Owner for instant review access
+          const res = await fetch('/api/v1/auth/demo-login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: 'usr-owner-01' }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setAuthToken(data.token);
+            setCurrentUser(data.user);
+          }
+        } catch (e) {
+          console.error('Auto demo login failed:', e);
+        }
+      }
+      fetchData();
+    };
+
+    initAuth();
+  }, [fetchData]);
+
+  // Switch role for RBAC testing by issuing a genuine session token
+  const handleSwitchRole = async (targetRole: UserRole) => {
     try {
-      const res = await fetch('/api/v1/auth/switch-role', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setCurrentUser(data.user);
+      // Find user id for role from demo accounts
+      const accountsRes = await fetch('/api/v1/auth/demo-accounts');
+      const accountsData = await accountsRes.json();
+      const matched = (accountsData.demoUsers || []).find((u: any) => u.role === targetRole);
+
+      if (matched) {
+        const res = await fetch('/api/v1/auth/demo-login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: matched.id }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setAuthToken(data.token);
+          setCurrentUser(data.user);
+          fetchData();
+        }
       }
     } catch (err) {
       console.error('Role switch error:', err);
     }
+  };
+
+  // Sign out
+  const handleLogout = async () => {
+    try {
+      await apiFetch('/api/v1/auth/logout', { method: 'POST' });
+    } catch (e) {
+      // ignore
+    } finally {
+      removeAuthToken();
+      setCurrentUser(null);
+      setIsLoginModalOpen(true);
+    }
+  };
+
+  // Login success callback
+  const handleAuthSuccess = (user: User, _token: string) => {
+    setCurrentUser(user);
+    setIsLoginModalOpen(false);
+    fetchData();
   };
 
   // Case updated callback
@@ -123,6 +192,8 @@ export default function App() {
         }}
         currentUser={currentUser}
         onSwitchRole={handleSwitchRole}
+        onOpenLoginModal={() => setIsLoginModalOpen(true)}
+        onLogout={handleLogout}
         isSandboxConfigured={gatewayStatus.isConfigured}
       />
 
@@ -215,10 +286,19 @@ export default function App() {
 
             {activeTab === 'audit' && <AuditLedgerView />}
 
+            {activeTab === 'team' && <TeamManagerView currentUser={currentUser} />}
+
             {activeTab === 'docs' && <DocsView />}
           </>
         )}
       </main>
+
+      {/* Authentication & Role Modal */}
+      <LoginModal
+        isOpen={isLoginModalOpen}
+        onClose={() => setIsLoginModalOpen(false)}
+        onSuccess={handleAuthSuccess}
+      />
 
       {/* Footer */}
       <footer className="border-t border-slate-200 bg-white py-4 text-xs text-slate-500">
