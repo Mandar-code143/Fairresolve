@@ -105,7 +105,7 @@ export const RefundModal: React.FC<RefundModalProps> = ({
                 <p className="text-xs text-amber-800 mt-1">
                   Your current role is <span className="font-mono font-bold">{currentUser?.role}</span>.
                   Executing refunds requires <span className="font-semibold">OWNER, ADMIN, or REVIEWER</span> privileges.
-                  Switch role using the top bar selector to test approval.
+                  Switch account persona from the top navigation to test authorization.
                 </p>
               </div>
             </div>

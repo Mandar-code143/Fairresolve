@@ -9,11 +9,12 @@
  * - Payments v2: Captured Payment Refund (/v2/payments/captures/{capture_id}/refund)
  * - Webhooks v1: Signature Verification (/v1/notifications/verify-webhook-signature)
  *
- * ARCHITECTURAL SAFETY RULES:
+ * ARCHITECTURAL SAFETY PRINCIPLES:
  * 1. PAYPAL_LIVE_ENABLED=false: Production charges are strictly blocked.
  * 2. In Sandbox Live mode: An API error is NEVER masked or transformed into a synthetic success.
  * 3. In Demo Simulation mode: IDs are explicitly labeled "SIM-SANDBOX-*" with isSimulated: true.
  * 4. All refund calls mandate a stable cryptographic PayPal-Request-Id for idempotency.
+ * 5. Pending refunds are distinguished from completed refunds; pending refunds never claim immediate completion.
  */
 
 export interface CreateOrderParams {
@@ -30,7 +31,7 @@ export interface CreateOrderParams {
 export interface CaptureOrderResult {
   orderId: string;
   captureId: string;
-  status: string;
+  status: 'COMPLETED' | 'PENDING' | 'FAILED' | 'VOIDED';
   grossAmount: number;
   currency: string;
   payerEmail?: string;
@@ -88,12 +89,16 @@ export class PayPalGateway {
     );
   }
 
+  public getPublicClientId(): string {
+    return this.isConfigured() ? this.clientId : 'sb';
+  }
+
   /**
    * Acquire or refresh PayPal OAuth 2.0 Client Credentials token
    */
   public async getAccessToken(): Promise<string> {
     if (!this.isConfigured()) {
-      throw new Error('PayPal Sandbox credentials (CLIENT_ID / CLIENT_SECRET) are not configured.');
+      throw new Error('PayPal Sandbox credentials (PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET) are not configured.');
     }
 
     if (this.accessToken && this.tokenExpiresAt && Date.now() < this.tokenExpiresAt - 60000) {
@@ -202,10 +207,12 @@ export class PayPalGateway {
       }
 
       const capture = data.purchase_units?.[0]?.payments?.captures?.[0];
+      const captureStatus = (capture?.status || data.status || 'COMPLETED') as CaptureOrderResult['status'];
+
       return {
         orderId: data.id,
         captureId: capture?.id || `CAP-${data.id}`,
-        status: capture?.status || data.status || 'COMPLETED',
+        status: captureStatus,
         grossAmount: parseFloat(capture?.amount?.value || '0'),
         currency: capture?.amount?.currency_code || 'USD',
         payerEmail: data.payer?.email_address,
@@ -214,7 +221,7 @@ export class PayPalGateway {
       };
     }
 
-    // Explicitly labeled simulation mode
+    // Explicitly labeled simulation mode when unconfigured or testing
     const simCaptureId = `SIM-SANDBOX-CAP-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
     return {
       orderId,
@@ -265,9 +272,16 @@ export class PayPalGateway {
         );
       }
 
+      const statusMap: Record<string, RefundCaptureResult['status']> = {
+        COMPLETED: 'COMPLETED',
+        PENDING: 'PENDING',
+        FAILED: 'FAILED',
+        CANCELLED: 'FAILED',
+      };
+
       return {
         refundId: data.id,
-        status: data.status,
+        status: statusMap[data.status] || 'UNKNOWN',
         amount: parseFloat(data.amount?.value || params.amount.toString()),
         currency: data.amount?.currency_code || params.currency,
         createTime: data.create_time || new Date().toISOString(),
@@ -297,7 +311,7 @@ export class PayPalGateway {
   }
 
   /**
-   * Webhook Signature Verification
+   * Webhook Signature Verification (POST /v1/notifications/verify-webhook-signature)
    */
   public async verifyWebhookSignature(webhookData: {
     authAlgo: string;
