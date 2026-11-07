@@ -5,23 +5,26 @@ WORKDIR /app
 
 # Install build essentials for native modules (sharp)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 make g++ \
+    python3 make g++ ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN npm install -g pnpm@10
 
 # Copy dependency manifests
-COPY package.json pnpm-lock.yaml* ./
+COPY package.json pnpm-lock.yaml ./
 
-# Install all dependencies including devDependencies for build
-RUN pnpm install --frozen-lockfile || pnpm install
+# Install all dependencies for build
+RUN pnpm install --frozen-lockfile
 
 # Copy application source files
 COPY . .
 
-# Build Vite frontend for production
+# Build Vite frontend and compile Node server to dist/server.js
 RUN pnpm run build
+
+# Prune development dependencies so only production node_modules remain
+RUN pnpm prune --prod
 
 # -------------------------------------------------------------
 # Production Runner Image
@@ -35,20 +38,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Copy package manifests and production dependencies
-COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --prod --frozen-lockfile || pnpm install --prod
-
-# Copy compiled frontend dist and compiled Node server
+# Copy package manifests, pruned production node_modules, and compiled artifacts
+COPY package.json ./
+COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 
-# Create non-volatile data directories and adjust ownership
+# Create non-volatile data directories and set permissions for non-root node user
 RUN mkdir -p /app/data /app/private_uploads && chown -R node:node /app
 
 USER node
