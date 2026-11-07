@@ -283,16 +283,16 @@ export const AuditLedgerView: React.FC = () => {
                   {isExpanded && ev.details && (
                     <div className="mt-3 p-3 rounded-lg bg-slate-900 text-slate-100 font-mono text-[11px] max-h-48 overflow-y-auto space-y-2">
                       {ev.previousHash && (
-                        <div className="text-slate-400 text-[10px]">
+                        <div className="text-slate-400 text-[10px] break-all">
                           <strong>Previous Block Hash:</strong> {ev.previousHash}
                         </div>
                       )}
                       {ev.currentHash && (
-                        <div className="text-emerald-400 text-[10px]">
+                        <div className="text-emerald-400 text-[10px] break-all">
                           <strong>Current Block Hash:</strong> {ev.currentHash}
                         </div>
                       )}
-                      <pre className="text-slate-200 whitespace-pre-wrap">
+                      <pre className="text-slate-200 whitespace-pre-wrap break-all">
                         {JSON.stringify(ev.details, null, 2)}
                       </pre>
                     </div>

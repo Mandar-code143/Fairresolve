@@ -53,109 +53,109 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Top Banner / Hero Summary */}
-      <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-6">
+      <div className="bg-white rounded-xl p-5 sm:p-6 border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-5 sm:gap-6">
         <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-xs font-mono font-semibold tracking-wider uppercase text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+          <div className="flex flex-wrap items-center gap-2 mb-1.5">
+            <span className="text-[11px] sm:text-xs font-mono font-semibold tracking-wider uppercase text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
               Merchant Dispute Operations
             </span>
-            <span className="text-xs text-slate-400">·</span>
-            <span className="text-xs font-mono text-slate-500">
+            <span className="text-slate-400 hidden sm:inline">·</span>
+            <span className="text-[11px] sm:text-xs font-mono text-slate-500">
               PayPal Developer Sandbox Integration
             </span>
           </div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
+          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
             Dispute Resolution & Payment Gateway Cockpit
           </h1>
-          <p className="text-sm text-slate-600 max-w-2xl mt-1">
+          <p className="text-xs sm:text-sm text-slate-600 max-w-2xl mt-1 leading-relaxed">
             FairResolve transforms unstructured customer complaints into evidence-aware, policy-grounded
             investigations, then allows authorized merchants to execute verified refunds through PayPal.
           </p>
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex flex-wrap sm:flex-nowrap items-center gap-2.5 shrink-0">
           <button
             onClick={() => onNavigate('checkout')}
-            className="px-4 py-2.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2 shadow-sm shadow-blue-500/20"
+            className="w-full sm:w-auto px-4 py-2.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 shadow-sm shadow-blue-500/20"
           >
             <ShoppingBag className="w-4 h-4" />
-            Simulate PayPal Checkout
+            <span>Simulate Checkout</span>
           </button>
           <button
             onClick={() => onNavigate('cases')}
-            className="px-4 py-2.5 bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg hover:bg-slate-200 transition-colors flex items-center gap-1.5"
+            className="w-full sm:w-auto px-4 py-2.5 bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg hover:bg-slate-200 transition-colors flex items-center justify-center gap-1.5"
           >
-            Open Case Inbox
+            <span>Open Case Inbox</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
 
-      {/* Primary KPI Metrics Strip */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+      {/* Primary KPI Metrics Strip (Adaptive 2-col on Mobile, 3-col on Laptop/Tablet, 6-col on Desktop) */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3 sm:gap-4">
         {/* Open Cases */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-          <span className="text-xs font-medium text-slate-500 block">Total Active Cases</span>
-          <div className="flex items-baseline justify-between mt-1.5">
-            <span className="text-2xl font-bold text-slate-900 font-mono tabular-nums">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+          <span className="text-xs font-medium text-slate-500 block truncate">Total Active Cases</span>
+          <div className="flex items-baseline justify-between mt-2 gap-2">
+            <span className="text-2xl sm:text-3xl font-bold text-slate-900 font-mono tabular-nums">
               {totalCases}
             </span>
-            <span className="text-xs text-slate-400 font-mono">Disputes</span>
+            <span className="text-xs text-slate-400 font-mono shrink-0">Disputes</span>
           </div>
         </div>
 
         {/* Ready for Review */}
-        <div className="bg-white p-4 rounded-xl border border-blue-200 bg-blue-50/20 shadow-sm">
-          <span className="text-xs font-semibold text-blue-700 block">Ready for Review</span>
-          <div className="flex items-baseline justify-between mt-1.5">
-            <span className="text-2xl font-bold text-blue-700 font-mono tabular-nums">
+        <div className="bg-white p-4 rounded-xl border border-blue-200 bg-blue-50/20 shadow-sm flex flex-col justify-between">
+          <span className="text-xs font-semibold text-blue-700 block truncate">Ready for Review</span>
+          <div className="flex items-baseline justify-between mt-2 gap-2">
+            <span className="text-2xl sm:text-3xl font-bold text-blue-700 font-mono tabular-nums">
               {readyForReview}
             </span>
-            <span className="text-xs text-blue-600 font-mono">Needs Decision</span>
+            <span className="text-xs text-blue-600 font-mono font-medium shrink-0">Needs Decision</span>
           </div>
         </div>
 
         {/* Awaiting Evidence */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-          <span className="text-xs font-medium text-slate-500 block">Awaiting Info / Evidence</span>
-          <div className="flex items-baseline justify-between mt-1.5">
-            <span className="text-2xl font-bold text-amber-700 font-mono tabular-nums">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+          <span className="text-xs font-medium text-slate-500 block truncate">Awaiting Info / Evidence</span>
+          <div className="flex items-baseline justify-between mt-2 gap-2">
+            <span className="text-2xl sm:text-3xl font-bold text-amber-700 font-mono tabular-nums">
               {awaitingEvidence}
             </span>
-            <span className="text-xs text-amber-600 font-mono">Pending Docs</span>
+            <span className="text-xs text-amber-600 font-mono shrink-0">Pending Docs</span>
           </div>
         </div>
 
         {/* Security Escalations */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-          <span className="text-xs font-medium text-slate-500 block">Escalated / Security</span>
-          <div className="flex items-baseline justify-between mt-1.5">
-            <span className="text-2xl font-bold text-red-700 font-mono tabular-nums">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+          <span className="text-xs font-medium text-slate-500 block truncate">Escalated / Security</span>
+          <div className="flex items-baseline justify-between mt-2 gap-2">
+            <span className="text-2xl sm:text-3xl font-bold text-red-700 font-mono tabular-nums">
               {escalated}
             </span>
-            <span className="text-xs text-red-600 font-mono">Hash Collision</span>
+            <span className="text-xs text-red-600 font-mono shrink-0">Hash Collision</span>
           </div>
         </div>
 
         {/* Refunds Executed */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-          <span className="text-xs font-medium text-slate-500 block">Refunds Executed</span>
-          <div className="flex items-baseline justify-between mt-1.5">
-            <span className="text-2xl font-bold text-emerald-700 font-mono tabular-nums">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+          <span className="text-xs font-medium text-slate-500 block truncate">Refunds Executed</span>
+          <div className="flex items-baseline justify-between mt-2 gap-2">
+            <span className="text-2xl sm:text-3xl font-bold text-emerald-700 font-mono tabular-nums">
               {refundedCases}
             </span>
-            <span className="text-xs text-emerald-600 font-mono">PayPal Settled</span>
+            <span className="text-xs text-emerald-600 font-mono shrink-0">PayPal Settled</span>
           </div>
         </div>
 
         {/* Total Refunded Gross */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-          <span className="text-xs font-medium text-slate-500 block">Refunded Volume</span>
-          <div className="flex items-baseline justify-between mt-1.5">
-            <span className="text-2xl font-bold text-slate-900 font-mono tabular-nums">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+          <span className="text-xs font-medium text-slate-500 block truncate">Refunded Volume</span>
+          <div className="flex items-baseline justify-between mt-2 gap-2">
+            <span className="text-2xl sm:text-3xl font-bold text-slate-900 font-mono tabular-nums">
               ${totalRefundedGross.toFixed(2)}
             </span>
-            <span className="text-xs text-slate-400 font-mono">USD</span>
+            <span className="text-xs text-slate-400 font-mono shrink-0">USD</span>
           </div>
         </div>
       </div>
@@ -164,38 +164,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left 2 Cols: Priority Case Queue */}
         <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+          <div className="px-5 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between">
             <div>
-              <h2 className="text-base font-bold text-slate-900">Priority Investigation Queue</h2>
+              <h2 className="text-sm sm:text-base font-bold text-slate-900">Priority Investigation Queue</h2>
               <p className="text-xs text-slate-500">
                 Customer disputes sorted by review readiness and policy evaluation
               </p>
             </div>
             <button
               onClick={() => onNavigate('cases')}
-              className="text-xs font-semibold text-blue-600 hover:text-blue-800 transition-colors flex items-center gap-1"
+              className="text-xs font-semibold text-blue-600 hover:text-blue-800 transition-colors flex items-center gap-1 shrink-0"
             >
-              View all ({totalCases})
+              <span>View all ({totalCases})</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
 
-          <div className="divide-y divide-slate-100 overflow-x-auto">
+          <div className="divide-y divide-slate-100">
             {recentCases.map((c) => {
               const order = orders.find((o) => o.id === c.orderId);
               return (
                 <div
                   key={c.id}
                   onClick={() => onSelectCase(c.id)}
-                  className="px-6 py-4 hover:bg-slate-50/80 cursor-pointer transition-colors flex items-center justify-between gap-4"
+                  className="px-4 sm:px-6 py-4 hover:bg-slate-50/80 cursor-pointer transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 mb-1">
+                    <div className="flex flex-wrap items-center gap-2 mb-1">
                       <span className="font-mono text-xs font-bold text-slate-900">
                         {c.caseNumber}
                       </span>
                       <span className="text-slate-300">·</span>
-                      <span className="text-xs font-medium text-slate-600 truncate">
+                      <span className="text-xs font-medium text-slate-700 truncate">
                         {c.customerName}
                       </span>
                       <span className="text-slate-300">·</span>
@@ -203,10 +203,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         Order {c.orderNumber}
                       </span>
                     </div>
-                    <p className="text-xs text-slate-600 line-clamp-1 italic">
+                    <p className="text-xs text-slate-600 line-clamp-2 italic">
                       "{c.customerDescription}"
                     </p>
-                    <div className="flex items-center gap-3 mt-2 text-[11px] text-slate-500">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[11px] text-slate-500">
                       <span className="capitalize font-medium">
                         Issue: {c.issueType.replace('_', ' ')}
                       </span>
@@ -215,11 +215,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         Amount: ${order ? order.grossAmount.toFixed(2) : '0.00'}
                       </span>
                       <span>·</span>
-                      <span>{c.evidence.length} evidence attachment(s)</span>
+                      <span>{c.evidence.length} evidence file(s)</span>
                     </div>
                   </div>
 
-                  <div className="text-right shrink-0 flex flex-col items-end gap-1.5">
+                  <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-1.5 shrink-0 pt-2 sm:pt-0 border-t sm:border-0 border-slate-100">
                     <CaseStatusBadge status={c.status} />
                     <span className="text-[11px] text-slate-400 font-mono">
                       {new Date(c.updatedAt).toLocaleDateString()}

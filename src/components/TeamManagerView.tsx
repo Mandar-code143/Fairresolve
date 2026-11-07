@@ -253,7 +253,7 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
               <h3 className="text-sm font-bold text-slate-900">Enforced RBAC Privilege Matrix</h3>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse">
+              <table className="min-w-[580px] w-full text-left text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 text-slate-500 font-mono">
                     <th className="py-2 pr-4 font-semibold">Capability</th>

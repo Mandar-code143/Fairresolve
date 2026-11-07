@@ -114,15 +114,15 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       {/* Switcher for testing multiple dispute tokens */}
-      <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex items-center justify-between text-xs">
-        <span className="text-slate-500 font-medium">Demo Customer Link Switcher:</span>
+      <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+        <span className="text-slate-500 font-medium shrink-0">Demo Customer Link Switcher:</span>
         <select
           value={selectedCaseToken}
           onChange={(e) => {
             setSelectedCaseToken(e.target.value);
             setSuccess(false);
           }}
-          className="bg-slate-50 border border-slate-200 rounded px-2.5 py-1 text-slate-800 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+          className="w-full sm:w-auto bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-slate-800 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
         >
           {cases.map((c) => (
             <option key={c.id} value={c.customerAccessToken}>
