@@ -259,6 +259,15 @@ export const requireAuth = (req: AuthenticatedRequest, res: Response, next: Next
   req.session = result.session;
   req.tenantId = result.session.tenantId;
 
+  // CSRF Protection: For mutating requests authenticated via cookie, require custom anti-CSRF header
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    const hasBearerHeader = Boolean(req.headers.authorization && req.headers.authorization.startsWith('Bearer '));
+    const hasCustomHeader = Boolean(req.headers['x-requested-with'] || req.headers['x-csrf-token']);
+    if (!hasBearerHeader && req.cookies && req.cookies.fairresolve_session && !hasCustomHeader) {
+      return res.status(403).json({ error: 'CSRF verification failed: Missing required anti-CSRF request header.' });
+    }
+  }
+
   next();
 };
 

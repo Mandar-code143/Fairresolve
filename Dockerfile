@@ -45,11 +45,8 @@ ENV PORT=3000
 COPY package.json pnpm-lock.yaml* ./
 RUN pnpm install --prod --frozen-lockfile || pnpm install --prod
 
-# Copy compiled frontend dist and server assets
+# Copy compiled frontend dist and compiled Node server
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/server.ts ./server.ts
-COPY --from=builder /app/src ./src
-COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
 # Create non-volatile data directories and adjust ownership
 RUN mkdir -p /app/data /app/private_uploads && chown -R node:node /app
@@ -61,4 +58,4 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD curl -f http://localhost:3000/health/live || exit 1
 
-CMD ["npx", "tsx", "server.ts"]
+CMD ["node", "dist/server.js"]

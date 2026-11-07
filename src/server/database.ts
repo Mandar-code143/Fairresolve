@@ -16,6 +16,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import pg from 'pg';
 import {
   Case,
   CaseEvent,
@@ -85,6 +86,9 @@ const DB_FILE = path.join(DATA_DIR, 'fairresolve_db.json');
 export class Database {
   private data: DatabaseSchema;
   private saveDebounceTimer?: NodeJS.Timeout;
+  private pgPool?: pg.Pool;
+  private isPostgresConnected: boolean = false;
+  private processedWebhookIds: Set<string> = new Set();
 
   constructor() {
     if (!fs.existsSync(DATA_DIR)) {
@@ -105,6 +109,48 @@ export class Database {
       this.seedInitialData();
       this.saveSync();
     }
+
+    this.initPostgres();
+  }
+
+  private async initPostgres() {
+    const dbUrl = process.env.DATABASE_URL;
+    if (dbUrl && dbUrl.trim() !== '') {
+      try {
+        this.pgPool = new pg.Pool({ connectionString: dbUrl, max: 10 });
+        const client = await this.pgPool.connect();
+        try {
+          const schemaPath = path.resolve(__dirname, 'database', 'schema.sql');
+          if (fs.existsSync(schemaPath)) {
+            const sql = fs.readFileSync(schemaPath, 'utf-8');
+            await client.query(sql);
+          }
+          this.isPostgresConnected = true;
+          console.log('[Database] PostgreSQL connected and schema verified successfully.');
+        } finally {
+          client.release();
+        }
+      } catch (err: any) {
+        console.warn('[Database] PostgreSQL connection failed, operating with durable atomic persistence:', err.message);
+        this.isPostgresConnected = false;
+      }
+    }
+  }
+
+  public isPostgresActive(): boolean {
+    return this.isPostgresConnected;
+  }
+
+  public getPgPool(): pg.Pool | undefined {
+    return this.pgPool;
+  }
+
+  public isWebhookProcessed(eventId: string): boolean {
+    return this.processedWebhookIds.has(eventId);
+  }
+
+  public markWebhookProcessed(eventId: string): void {
+    this.processedWebhookIds.add(eventId);
   }
 
   private getDefaultSchema(): DatabaseSchema {

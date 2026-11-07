@@ -27,6 +27,11 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}): Pro
     headers.set('Authorization', `Bearer ${inMemoryToken}`);
   }
 
+  // Anti-CSRF protection header for state-changing requests
+  if (!headers.has('X-Requested-With')) {
+    headers.set('X-Requested-With', 'XMLHttpRequest');
+  }
+
   // Set Content-Type to application/json by default unless body is FormData or already defined
   if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
