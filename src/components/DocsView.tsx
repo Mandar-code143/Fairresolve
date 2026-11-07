@@ -45,7 +45,7 @@ export const DocsView: React.FC = () => {
           <p className="text-slate-300 leading-relaxed">
             FairResolve fundamentally distinguishes between six epistemic categories:
           </p>
-          <div className="grid grid-cols-2 gap-2 pt-2 text-[11px] font-mono">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 text-[11px] font-mono">
             <span className="p-1.5 rounded bg-slate-800 border border-slate-700 text-purple-300">
               [CUSTOMER REPORTED] Allegations & text
             </span>

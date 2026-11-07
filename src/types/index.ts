@@ -34,6 +34,7 @@ export type CaseStatus =
   | 'REFUND_SUBMITTED'
   | 'REFUND_PENDING'
   | 'REFUND_UNKNOWN'
+  | 'PARTIALLY_REFUNDED'
   | 'REFUNDED'
   | 'REFUND_FAILED'
   | 'REJECTED'
@@ -197,6 +198,8 @@ export interface CaseEvent {
   summary: string;
   details?: Record<string, any>;
   timestamp: string;
+  previousHash?: string;
+  currentHash?: string;
 }
 
 export interface Case {
@@ -236,3 +239,18 @@ export interface PayPalGatewayStatus {
   refundCount: number;
   totalRefundedGross: number;
 }
+
+export interface MerchantInvitation {
+  id: string;
+  tenantId: string;
+  email: string;
+  role: UserRole;
+  tokenHash: string;
+  invitedByUserId: string;
+  invitedByName: string;
+  status: 'PENDING' | 'ACCEPTED' | 'REVOKED' | 'EXPIRED';
+  expiresAt: string;
+  createdAt: string;
+  acceptedAt?: string;
+}
+

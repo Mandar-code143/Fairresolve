@@ -1,6 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { Users, UserPlus, Shield, ShieldCheck, Mail, Calendar, AlertCircle, Loader2 } from 'lucide-react';
-import { User, UserRole } from '../types';
+import {
+  Users,
+  UserPlus,
+  Shield,
+  ShieldCheck,
+  Mail,
+  Calendar,
+  AlertCircle,
+  Loader2,
+  Copy,
+  Check,
+  Trash2,
+  Clock,
+  Link,
+} from 'lucide-react';
+import { User, UserRole, MerchantInvitation } from '../types';
 import { apiFetch } from '../utils/api';
 
 interface TeamMember {
@@ -17,10 +31,12 @@ interface TeamManagerViewProps {
 
 export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser }) => {
   const [members, setMembers] = useState<TeamMember[]>([]);
+  const [invitations, setInvitations] = useState<MerchantInvitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [inviting, setInviting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [generatedInviteLink, setGeneratedInviteLink] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   // Form states
   const [name, setName] = useState('');
@@ -29,23 +45,31 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
 
   const canInvite = currentUser && ['OWNER', 'ADMIN'].includes(currentUser.role);
 
-  const fetchTeam = async () => {
+  const fetchTeamAndInvitations = async () => {
     try {
       setLoading(true);
-      const res = await apiFetch('/api/v1/merchant/team');
-      if (res.ok) {
-        const data = await res.json();
+      const [membersRes, invitesRes] = await Promise.all([
+        apiFetch('/api/v1/merchant/team'),
+        apiFetch('/api/v1/merchant/team/invitations'),
+      ]);
+
+      if (membersRes.ok) {
+        const data = await membersRes.json();
         setMembers(data.members || []);
       }
+      if (invitesRes.ok) {
+        const data = await invitesRes.json();
+        setInvitations(data.invitations || []);
+      }
     } catch (err: any) {
-      console.error('Failed to fetch team members:', err);
+      console.error('Failed to fetch team members or invitations:', err);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchTeam();
+    fetchTeamAndInvitations();
   }, []);
 
   const handleInvite = async (e: React.FormEvent) => {
@@ -53,7 +77,7 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
     if (!canInvite) return;
     setInviting(true);
     setError(null);
-    setSuccessMsg(null);
+    setGeneratedInviteLink(null);
 
     try {
       const res = await apiFetch('/api/v1/merchant/team/invite', {
@@ -63,14 +87,35 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to invite team member');
 
-      setSuccessMsg(`Successfully invited ${name} as ${role}!`);
+      const fullLink = `${window.location.origin}${data.inviteLink}`;
+      setGeneratedInviteLink(fullLink);
       setName('');
       setEmail('');
-      fetchTeam();
+      fetchTeamAndInvitations();
     } catch (err: any) {
       setError(err.message || 'Invitation failed');
     } finally {
       setInviting(false);
+    }
+  };
+
+  const handleCopyLink = () => {
+    if (!generatedInviteLink) return;
+    navigator.clipboard.writeText(generatedInviteLink);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+  };
+
+  const handleRevokeInvitation = async (invitationId: string) => {
+    try {
+      const res = await apiFetch(`/api/v1/merchant/team/invitations/${invitationId}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        fetchTeamAndInvitations();
+      }
+    } catch (err) {
+      console.error('Revocation error:', err);
     }
   };
 
@@ -80,32 +125,33 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-slate-200">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
-            Team & Role-Based Access Control (RBAC)
+            Team Management & Role-Based Access Control (RBAC)
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-1">
-            Manage authorized merchant operators, review privilege boundaries, and enforce the principle of least privilege.
+            Manage authorized merchant operators, issue cryptographic invitation links, and enforce least-privilege boundaries.
           </p>
         </div>
       </div>
 
       {/* Grid: Members List & Invite Form */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left Column: Team Members (2 cols) */}
-        <div className="lg:col-span-2 space-y-4">
+        {/* Left Column: Team Members & Pending Invites (2 cols) */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Active Members Card */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Users className="w-4 h-4 text-blue-600" />
-                <h2 className="text-sm font-bold text-slate-900">Organization Members</h2>
+                <Users className="w-4 h-4 text-[#0070BA]" />
+                <h2 className="text-sm font-bold text-slate-900">Active Organization Members</h2>
               </div>
               <span className="text-xs font-mono text-slate-500">
-                {members.length} Active {members.length === 1 ? 'Operator' : 'Operators'}
+                {members.length} {members.length === 1 ? 'Operator' : 'Operators'}
               </span>
             </div>
 
             {loading ? (
               <div className="p-12 text-center text-slate-400">
-                <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-blue-600" />
+                <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-[#0070BA]" />
                 <p className="text-xs font-mono">Loading team records...</p>
               </div>
             ) : (
@@ -142,9 +188,9 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
                       <span
                         className={`text-xs font-mono font-semibold px-2.5 py-1 rounded-md border ${
                           member.role === 'OWNER'
-                            ? 'bg-blue-50 text-blue-700 border-blue-200'
+                            ? 'bg-purple-50 text-purple-700 border-purple-200'
                             : member.role === 'ADMIN'
-                            ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                            ? 'bg-blue-50 text-blue-700 border-blue-200'
                             : member.role === 'REVIEWER'
                             ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                             : member.role === 'ANALYST'
@@ -161,6 +207,45 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
             )}
           </div>
 
+          {/* Pending Invitations Card */}
+          {invitations.length > 0 && (
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-6 py-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-amber-600" />
+                  <h3 className="text-sm font-bold text-slate-900">Pending Invitations (Awaiting Acceptance)</h3>
+                </div>
+                <span className="text-xs font-mono text-slate-500">{invitations.length} Pending</span>
+              </div>
+
+              <div className="divide-y divide-slate-100">
+                {invitations.map((inv) => (
+                  <div
+                    key={inv.id}
+                    className="p-4 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                  >
+                    <div>
+                      <div className="font-semibold text-slate-900 font-mono">{inv.email}</div>
+                      <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                        Role: <span className="font-bold text-slate-700">{inv.role}</span> · Invited by {inv.invitedByName} · Expires{' '}
+                        {new Date(inv.expiresAt).toLocaleDateString()}
+                      </div>
+                    </div>
+                    {canInvite && (
+                      <button
+                        onClick={() => handleRevokeInvitation(inv.id)}
+                        className="text-xs text-rose-600 hover:text-rose-800 flex items-center gap-1 font-medium"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Revoke Invite
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* RBAC Privilege Matrix */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
             <div className="flex items-center gap-2 mb-4">
@@ -168,7 +253,7 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
               <h3 className="text-sm font-bold text-slate-900">Enforced RBAC Privilege Matrix</h3>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse">
+              <table className="min-w-[580px] w-full text-left text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 text-slate-500 font-mono">
                     <th className="py-2 pr-4 font-semibold">Capability</th>
@@ -236,9 +321,9 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
 
         {/* Right Column: Invite New Operator Form */}
         <div>
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 sticky top-24">
-            <div className="flex items-center gap-2 mb-4">
-              <UserPlus className="w-4 h-4 text-blue-600" />
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 sticky top-24 space-y-4">
+            <div className="flex items-center gap-2 mb-2">
+              <UserPlus className="w-4 h-4 text-[#0070BA]" />
               <h2 className="text-sm font-bold text-slate-900">Invite Team Member</h2>
             </div>
 
@@ -246,7 +331,7 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
               <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 space-y-1">
                 <p className="font-semibold">Restricted Action</p>
                 <p>
-                  Your current role (<span className="font-mono font-bold">{currentUser?.role}</span>) does not have permission to invite team members. Switch to OWNER or ADMIN to invite operators.
+                  Your current role (<span className="font-mono font-bold">{currentUser?.role}</span>) does not have permission to invite team members. Switch to OWNER or ADMIN persona to invite operators.
                 </p>
               </div>
             ) : (
@@ -257,10 +342,29 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
                     <span>{error}</span>
                   </div>
                 )}
-                {successMsg && (
-                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800 flex items-center gap-2">
-                    <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-600" />
-                    <span>{successMsg}</span>
+
+                {generatedInviteLink && (
+                  <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-lg space-y-2 text-xs">
+                    <div className="flex items-center gap-1.5 font-bold text-emerald-900">
+                      <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                      <span>Invitation Link Generated!</span>
+                    </div>
+                    <p className="text-[11px] text-emerald-800">
+                      Share this one-time link with the team member. They will choose their own password upon accepting.
+                    </p>
+                    <div className="flex items-center gap-2 bg-white p-2 rounded border border-emerald-200">
+                      <span className="font-mono text-[10px] text-slate-600 truncate flex-1">
+                        {generatedInviteLink}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleCopyLink}
+                        className="px-2.5 py-1 bg-[#0070BA] text-white rounded text-[11px] font-semibold flex items-center gap-1 shrink-0"
+                      >
+                        {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                        {copied ? 'Copied!' : 'Copy'}
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -272,7 +376,7 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
                     placeholder="e.g. Morgan Bailey"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#0070BA]"
                   />
                 </div>
 
@@ -284,7 +388,7 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
                     placeholder="m.bailey@apex-audio.com"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#0070BA]"
                   />
                 </div>
 
@@ -293,7 +397,7 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
                   <select
                     value={role}
                     onChange={(e) => setRole(e.target.value as UserRole)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#0070BA] bg-white"
                   >
                     <option value="ADMIN">ADMIN (Full policy & refund authority)</option>
                     <option value="REVIEWER">REVIEWER (Case review & refund execution)</option>
@@ -306,17 +410,17 @@ export const TeamManagerView: React.FC<TeamManagerViewProps> = ({ currentUser })
                   <button
                     type="submit"
                     disabled={inviting}
-                    className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-colors disabled:bg-slate-400"
+                    className="w-full py-2.5 px-4 bg-[#0070BA] hover:bg-[#003087] text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-colors disabled:bg-slate-400 shadow-sm"
                   >
                     {inviting ? (
                       <>
                         <Loader2 className="w-4 h-4 animate-spin" />
-                        Generating Credentials...
+                        Generating Invitation...
                       </>
                     ) : (
                       <>
-                        <UserPlus className="w-4 h-4" />
-                        Issue Credentials & Invite
+                        <Link className="w-4 h-4" />
+                        Generate Secure Invitation Link
                       </>
                     )}
                   </button>

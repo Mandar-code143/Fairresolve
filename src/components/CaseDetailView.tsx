@@ -190,11 +190,11 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
         </div>
 
         {/* Primary Action Buttons */}
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex flex-wrap sm:flex-nowrap items-center gap-2.5 shrink-0">
           <button
             onClick={handleReanalyze}
             disabled={isAnalyzing}
-            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5"
+            className="w-full sm:w-auto px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzing ? 'animate-spin' : ''}`} />
             Re-run AI & Policy
@@ -203,7 +203,7 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
           {caseData.status !== 'REFUNDED' && (
             <button
               onClick={() => setShowRefundModal(true)}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg shadow-sm shadow-blue-500/20 transition-colors flex items-center gap-1.5"
+              className="w-full sm:w-auto px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg shadow-sm shadow-blue-500/20 transition-colors flex items-center justify-center gap-1.5"
             >
               <CreditCard className="w-4 h-4" />
               Authorize PayPal Refund

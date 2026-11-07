@@ -4,14 +4,16 @@
  * Uses Google Gen AI SDK (@google/genai) to perform multimodal analysis of customer complaints,
  * visual evidence inspection, and policy grounding.
  *
- * CRITICAL SAFETY RULES:
+ * ARCHITECTURAL SAFETY PRINCIPLES:
  * 1. AI observations are strictly informational and do NOT constitute payment authorization.
  * 2. Customer text, filenames, and extracted image contents are treated as untrusted data.
- * 3. Never execute payments or state transitions directly from AI output.
- * 4. When the AI model is unconfigured or fails, NEVER falsely claim that visual analysis took place.
+ * 3. Strict Zod schema validation prevents malformed model responses from causing state corruption.
+ * 4. Prompt injection sanitization neutralizes override attempts from adversarial customer input.
+ * 5. When the AI model is unconfigured or fails, NEVER falsely claim that visual analysis took place.
  */
 
 import { GoogleGenAI, Type } from '@google/genai';
+import { z } from 'zod';
 import { AIInvestigationResult, IssueType, RefundPolicy } from '../types';
 
 export interface InvestigationInput {
@@ -23,9 +25,41 @@ export interface InvestigationInput {
   imagesBase64?: Array<{ mimeType: string; data: string; filename: string }>;
 }
 
+// Zod Schema for strict validation of Gemini Model Output
+export const AIInvestigationSchema = z.object({
+  issue_type: z.string().default('damaged_item'),
+  customer_claim: z.string().min(1),
+  reported_facts: z.array(z.string()).default([]),
+  evidence_observations: z.array(z.string()).default([]),
+  missing_information: z.array(z.string()).default([]),
+  inconsistencies: z.array(z.string()).default([]),
+  policy_references: z.array(z.string()).default([]),
+  limitations: z.array(z.string()).default([]),
+  recommended_next_step: z.enum([
+    'request_more_information',
+    'eligible_for_merchant_review',
+    'manual_inspection_required',
+    'ineligible_under_policy',
+  ]),
+  explanation: z.string().min(1),
+});
+
+/**
+ * Sanitizes untrusted user strings to protect prompt boundaries from injection attacks.
+ */
+function sanitizePromptInput(text: string, maxLength: number = 2000): string {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .slice(0, maxLength)
+    .replace(/```/g, "'''")
+    .replace(/<\|im_start\|>|<\|im_end\|>/gi, '')
+    .replace(/\b(ignore previous instructions|system override|developer mode)\b/gi, '[REDACTED_PROMPT_INJECTION]')
+    .trim();
+}
+
 export class GeminiService {
   private ai?: GoogleGenAI;
-  private modelName = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+  private modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
   constructor() {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -34,7 +68,7 @@ export class GeminiService {
         apiKey,
         httpOptions: {
           headers: {
-            'User-Agent': 'aistudio-build',
+            'User-Agent': 'fairresolve-investigation-engine',
           },
         },
       });
@@ -62,19 +96,22 @@ export class GeminiService {
           }
         }
 
+        const sanitizedClaim = sanitizePromptInput(input.customerClaim, 3000);
+        const sanitizedOrderNumber = sanitizePromptInput(input.orderNumber, 50);
+
         const promptText = `
 You are the FairResolve Dispute Investigation AI.
 Analyze the following online merchant dispute objectively.
 
 MERCHANT ORDER CONTEXT:
-Order Number: ${input.orderNumber}
-Items Purchased: ${input.itemsOrdered.map((i) => `${i.name} (SKU: ${i.sku}, Qty: ${i.quantity})`).join(', ')}
+Order Number: ${sanitizedOrderNumber}
+Items Purchased: ${input.itemsOrdered.map((i) => `${sanitizePromptInput(i.name, 100)} (SKU: ${sanitizePromptInput(i.sku, 50)}, Qty: ${i.quantity})`).join(', ')}
 
 CUSTOMER CLAIM (UNTRUSTED USER INPUT):
 Claimed Issue Category: ${input.issueType}
-Customer Statement: "${input.customerClaim.replace(/"/g, "'")}"
+Customer Statement: "${sanitizedClaim}"
 
-MERCHANT REFUND POLICY SUMMARY:
+MERCHANT REFUND POLICY CONSTRAINTS:
 - Policy Version: ${input.policy.version}
 - Return Window: ${input.policy.returnWindowDays} calendar days
 - Required Evidence for Damaged Items: Packaging photo required=${input.policy.requirePackagingPhotoForDamage}
@@ -82,16 +119,16 @@ MERCHANT REFUND POLICY SUMMARY:
 - Mandatory Physical Return Threshold: Items over $${input.policy.mandatoryReturnThreshold.toFixed(2)}
 - Partial Refund Allowed Without Return: ${input.policy.allowPartialRefundsWithoutReturn} (up to ${input.policy.maxPartialRefundPercentage}%)
 
-INSTRUCTIONS:
-1. Treat customer statement as an allegation, not an established fact.
-2. If images are provided, describe verifiable visible features (e.g. physical cracks, dents, labels, product models).
-3. State clearly what can and CANNOT be concluded from the image (e.g. "image shows a crack, but cannot establish whether it occurred before or after delivery").
-4. Identify any missing information needed by the merchant.
-5. Highlight any inconsistencies.
-6. Recommend a next step for the merchant (request_more_information, eligible_for_merchant_review, manual_inspection_required, or ineligible_under_policy).
-7. Remember: You cannot authorize or execute a payment.
+CORE INVESTIGATION PRINCIPLES:
+1. Treat customer statement strictly as an allegation, not an established fact.
+2. If images are attached, describe verifiable visual details (e.g. cracked enclosure, dented carton, shipping label tracking match).
+3. State explicitly what CANNOT be concluded from the image (e.g. "photograph cannot establish whether damage occurred prior to transit, during delivery, or after customer unboxing").
+4. Identify any missing information or documents needed by the merchant.
+5. Highlight any inconsistencies between the claim, photographs, and order items.
+6. Recommend a next step for the merchant: request_more_information | eligible_for_merchant_review | manual_inspection_required | ineligible_under_policy.
+7. Under no circumstances do you authorize or disburse payments.
 
-Respond in strict JSON conforming to the requested schema.
+Respond strictly in valid JSON adhering to the specified schema.
 `;
 
         parts.push({ text: promptText });
@@ -173,34 +210,38 @@ Respond in strict JSON conforming to the requested schema.
         const rawJson = response.text?.trim() || '{}';
         const parsed = JSON.parse(rawJson);
 
+        // Strict Zod schema validation
+        const validated = AIInvestigationSchema.parse(parsed);
+
         return {
           issue_type: input.issueType,
-          customer_claim: parsed.customer_claim || input.customerClaim,
-          reported_facts: Array.isArray(parsed.reported_facts) ? parsed.reported_facts : [],
-          evidence_observations: Array.isArray(parsed.evidence_observations) ? parsed.evidence_observations : [],
-          missing_information: Array.isArray(parsed.missing_information) ? parsed.missing_information : [],
-          inconsistencies: Array.isArray(parsed.inconsistencies) ? parsed.inconsistencies : [],
-          policy_references: Array.isArray(parsed.policy_references) ? parsed.policy_references : [],
-          limitations: Array.isArray(parsed.limitations)
-            ? parsed.limitations
-            : ['Photographs cannot independently verify the exact timestamp or cause of damage.'],
-          recommended_next_step: parsed.recommended_next_step || 'eligible_for_merchant_review',
-          explanation: parsed.explanation || 'Case processed with Gemini multimodal investigation.',
+          customer_claim: validated.customer_claim || input.customerClaim,
+          reported_facts: validated.reported_facts,
+          evidence_observations: validated.evidence_observations,
+          missing_information: validated.missing_information,
+          inconsistencies: validated.inconsistencies,
+          policy_references: validated.policy_references,
+          limitations:
+            validated.limitations.length > 0
+              ? validated.limitations
+              : ['Photographs cannot independently verify the exact timestamp or cause of physical damage.'],
+          recommended_next_step: validated.recommended_next_step,
+          explanation: validated.explanation,
           analyzed_at: new Date().toISOString(),
           model_used: this.modelName,
           is_fallback: false,
         };
-      } catch (err) {
-        console.warn('Gemini API call error, recording deterministic fallback:', err);
+      } catch (err: any) {
+        console.warn('Gemini API call or validation error; recording deterministic baseline:', err.message || err);
       }
     }
 
-    // Honest deterministic baseline when Gemini is not configured
+    // Honest deterministic baseline when Gemini is unconfigured or fails
     return this.createDeterministicInvestigation(input);
   }
 
   private createDeterministicInvestigation(input: InvestigationInput): AIInvestigationResult {
-    const hasPhotos = input.imagesBase64 && input.imagesBase64.length > 0;
+    const hasPhotos = Boolean(input.imagesBase64 && input.imagesBase64.length > 0);
     const isDamaged = input.issueType === 'damaged_item';
     const isWrong = input.issueType === 'wrong_item';
     const isINR = input.issueType === 'item_not_received';
@@ -222,7 +263,7 @@ Respond in strict JSON conforming to the requested schema.
       if (isDamaged || isWrong) {
         missing.push(
           isDamaged
-            ? 'Clear photo of damaged area and outer shipping packaging'
+            ? 'Clear photo of damaged area and outer shipping packaging carton'
             : 'Photo of SKU or box barcode label received'
         );
         nextStep = 'request_more_information';
@@ -247,7 +288,10 @@ Respond in strict JSON conforming to the requested schema.
       policy_references: [
         `Policy ${input.policy.version}: Return window ${input.policy.returnWindowDays} calendar days.`,
         isDamaged && input.policy.requirePackagingPhotoForDamage
-          ? 'Clause 4.2: Packaging photo required for damage'
+          ? 'Clause 4.2: Packaging photo required for damage claims'
+          : '',
+        isWrong && input.policy.requireLabelPhotoForWrongItem
+          ? 'Clause 5.1: Packaging SKU/barcode label required for wrong item claims'
           : '',
       ].filter(Boolean),
       limitations,

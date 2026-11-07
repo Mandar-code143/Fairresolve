@@ -1,18 +1,26 @@
 /**
  * FairResolve Private Evidence Processing Pipeline
- * Enforces magic-byte inspection, file-size limits, cryptographic SHA-256 fingerprinting,
- * cross-case duplicate collision detection, and private storage isolation.
+ *
+ * Implements:
+ * - Magic-byte inspection (JPEG, PNG, WEBP)
+ * - Safe image decoding, EXIF metadata stripping, and sanitizing re-encoding via Sharp
+ * - Decompression bomb defense (max 8000x8000 px, max 30MP)
+ * - Cryptographic SHA-256 fingerprinting on sanitized file content
+ * - Tenant-scoped duplicate hash collision detection
+ * - Truthful scanStatus tracking: 'unscanned' unless scanned by an actual scanner
+ * - Scaled thumbnail generation (< 40KB) to prevent unbounded memory growth in API payloads
+ * - Private storage with UUIDs and authorized-only retrieval
  */
 
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import sharp, { Metadata } from 'sharp';
 import { EvidenceObject } from '../types';
 import { db } from './database';
 
 const UPLOADS_DIR = path.resolve(process.cwd(), 'private_uploads');
 
-// Ensure private uploads directory exists
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
@@ -27,7 +35,7 @@ export class EvidenceProcessor {
   /**
    * Validate file buffer signature against accepted MIME types
    */
-  validateSignature(buffer: Buffer): { isValid: boolean; mimeType: string; ext: string } {
+  public validateSignature(buffer: Buffer): { isValid: boolean; mimeType: string; ext: string } {
     if (buffer.length < 12) {
       return { isValid: false, mimeType: '', ext: '' };
     }
@@ -62,7 +70,7 @@ export class EvidenceProcessor {
   }
 
   /**
-   * Process and quarantine upload
+   * Process, sanitize, decode and re-encode upload using Sharp
    */
   async processUpload(
     caseId: string,
@@ -71,50 +79,102 @@ export class EvidenceProcessor {
     evidenceType: EvidenceObject['evidenceType'] = 'item_photo',
     caption?: string
   ): Promise<ProcessUploadResult> {
-    // 1. Enforce max 5MB size limit
-    const MAX_SIZE = 5 * 1024 * 1024;
+    // 1. Enforce max 10MB size limit
+    const MAX_SIZE = 10 * 1024 * 1024;
     if (fileBuffer.length > MAX_SIZE) {
-      throw new Error(`File exceeds maximum permitted size of 5MB (Actual: ${(fileBuffer.length / 1024 / 1024).toFixed(2)}MB)`);
+      throw new Error(
+        `File exceeds maximum permitted size of 10MB (Actual: ${(fileBuffer.length / 1024 / 1024).toFixed(2)}MB)`
+      );
     }
 
-    // 2. Validate real byte signature (never trust client extension)
+    // 2. Validate real byte signature (magic bytes)
     const { isValid, mimeType, ext } = this.validateSignature(fileBuffer);
     if (!isValid) {
-      throw new Error('Unsupported or malformed file format. Only valid JPEG, PNG, and WEBP images are accepted.');
+      throw new Error(
+        'Unsupported or malformed file format. Only authentic JPEG, PNG, and WEBP images are accepted.'
+      );
     }
 
-    // 3. Compute exact SHA-256 hash
-    const sha256Hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+    // 3. Decompression bomb protection & safe decoding via Sharp
+    let metadata: Metadata;
+    let sanitizedBuffer: Buffer;
+    let thumbnailBase64: string;
 
-    // 4. Cross-case duplicate hash check
+    try {
+      const imageInstance = sharp(fileBuffer);
+      metadata = await imageInstance.metadata();
+
+      const width = metadata.width || 0;
+      const height = metadata.height || 0;
+      const totalPixels = width * height;
+
+      if (width > 8000 || height > 8000 || totalPixels > 30000000) {
+        throw new Error(
+          `Image resolution (${width}x${height}, ${totalPixels} pixels) exceeds safe limit of 8000x8000 / 30MP.`
+        );
+      }
+
+      // Re-encode to strip malicious EXIF, ICC profiles, and non-image payloads
+      if (ext === 'jpg') {
+        sanitizedBuffer = await sharp(fileBuffer)
+          .rotate() // Auto-orient based on EXIF before stripping
+          .jpeg({ quality: 88, mozjpeg: true })
+          .toBuffer();
+      } else if (ext === 'png') {
+        sanitizedBuffer = await sharp(fileBuffer)
+          .png({ compressionLevel: 8 })
+          .toBuffer();
+      } else {
+        sanitizedBuffer = await sharp(fileBuffer)
+          .webp({ quality: 85 })
+          .toBuffer();
+      }
+
+      // Generate compact thumbnail (max 360px width, ~20-40KB)
+      const thumbBuf = await sharp(sanitizedBuffer)
+        .resize({ width: 360, withoutEnlargement: true })
+        .jpeg({ quality: 75 })
+        .toBuffer();
+
+      thumbnailBase64 = `data:image/jpeg;base64,${thumbBuf.toString('base64')}`;
+    } catch (err: any) {
+      throw new Error(`Corrupted or unsafe image file: ${err.message}`);
+    }
+
+    // 4. Compute cryptographic SHA-256 fingerprint on sanitized image
+    const sha256Hash = crypto.createHash('sha256').update(sanitizedBuffer).digest('hex');
+
+    // 5. Cross-case duplicate hash check
     const duplicateCaseIds = db.findDuplicateEvidence(sha256Hash, caseId);
     const isDuplicate = duplicateCaseIds.length > 0;
 
-    // 5. Store privately with unpredictable UUID filename
+    // 6. Store privately with unpredictable UUID filename
     const fileId = `ev-${crypto.randomUUID().substring(0, 12)}`;
     const storageFilename = `${fileId}.${ext}`;
     const storagePath = path.join(UPLOADS_DIR, storageFilename);
 
-    await fs.promises.writeFile(storagePath, fileBuffer);
+    await fs.promises.writeFile(storagePath, sanitizedBuffer);
 
-    // Create thumbnail base64 preview (inline for rapid UI response)
-    const previewBase64 = `data:${mimeType};base64,${fileBuffer.toString('base64')}`;
+    // 7. Truthful scan status (Never claim clean without a real antivirus/malware scanner)
+    const scanStatus: EvidenceObject['scanStatus'] = isDuplicate ? 'suspicious' : 'unscanned';
 
     const evidence: EvidenceObject = {
       id: fileId,
       caseId,
       originalFilename: path.basename(originalFilename).replace(/[^a-zA-Z0-9._-]/g, '_'),
       mimeType,
-      byteSize: fileBuffer.length,
+      byteSize: sanitizedBuffer.length,
+      width: metadata.width,
+      height: metadata.height,
       sha256Hash,
       isDuplicate,
       duplicateCaseIds: isDuplicate ? duplicateCaseIds : undefined,
       uploadedAt: new Date().toISOString(),
-      scanStatus: isDuplicate ? 'suspicious' : 'clean',
+      scanStatus,
       evidenceType,
       caption,
       downloadUrl: `/api/v1/evidence/${fileId}/file`,
-      thumbnailBase64: previewBase64,
+      thumbnailBase64,
     };
 
     return {
@@ -124,10 +184,11 @@ export class EvidenceProcessor {
     };
   }
 
-  getFilePath(fileId: string): string | null {
-    // Find matching file in UPLOADS_DIR
+  public getFilePath(fileId: string): string | null {
+    if (!fileId || typeof fileId !== 'string') return null;
+    const sanitized = fileId.replace(/[^a-zA-Z0-9_-]/g, '');
     const files = fs.readdirSync(UPLOADS_DIR);
-    const match = files.find((f) => f.startsWith(`${fileId}.`));
+    const match = files.find((f) => f.startsWith(`${sanitized}.`));
     if (!match) return null;
     return path.join(UPLOADS_DIR, match);
   }

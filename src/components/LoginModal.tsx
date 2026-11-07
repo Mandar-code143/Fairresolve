@@ -142,9 +142,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onSucce
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full overflow-hidden border border-slate-200">
+      <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden border border-slate-200">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-900 text-white">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-900 text-white shrink-0">
           <div className="flex items-center gap-2.5">
             <div className="p-2 rounded bg-blue-600/30 text-blue-400 border border-blue-500/30">
               <Shield className="w-5 h-5" />
@@ -165,10 +165,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onSucce
         </div>
 
         {/* Tab Selector */}
-        <div className="flex border-b border-slate-200 bg-slate-50 px-6 pt-3 gap-2">
+        <div className="flex border-b border-slate-200 bg-slate-50 px-6 pt-3 gap-2 shrink-0 overflow-x-auto">
           <button
             onClick={() => setActiveTab('demo')}
-            className={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors ${
+            className={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${
               activeTab === 'demo'
                 ? 'border-blue-600 text-blue-600 bg-white'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
@@ -178,7 +178,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onSucce
           </button>
           <button
             onClick={() => setActiveTab('password')}
-            className={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors ${
+            className={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${
               activeTab === 'password'
                 ? 'border-blue-600 text-blue-600 bg-white'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
@@ -188,7 +188,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onSucce
           </button>
           <button
             onClick={() => setActiveTab('register')}
-            className={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors ${
+            className={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${
               activeTab === 'register'
                 ? 'border-blue-600 text-blue-600 bg-white'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
@@ -199,7 +199,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onSucce
         </div>
 
         {/* Content Body */}
-        <div className="p-6">
+        <div className="p-5 sm:p-6 overflow-y-auto flex-1">
           {error && (
             <div className="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0" />

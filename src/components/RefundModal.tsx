@@ -69,9 +69,9 @@ export const RefundModal: React.FC<RefundModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-xl w-full overflow-hidden border border-slate-200">
+      <div className="bg-white rounded-xl shadow-2xl max-w-xl w-full max-h-[90vh] flex flex-col overflow-hidden border border-slate-200">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-900 text-white">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-900 text-white shrink-0">
           <div className="flex items-center gap-2.5">
             <div className="p-2 rounded bg-blue-600/30 text-blue-400 border border-blue-500/40">
               <CreditCard className="w-5 h-5" />
@@ -93,7 +93,7 @@ export const RefundModal: React.FC<RefundModalProps> = ({
         </div>
 
         {/* Body */}
-        <div className="p-6 space-y-5">
+        <div className="p-5 sm:p-6 space-y-5 overflow-y-auto flex-1">
           {/* RBAC Warning if viewer */}
           {!isAuthorized && (
             <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3">
@@ -105,7 +105,7 @@ export const RefundModal: React.FC<RefundModalProps> = ({
                 <p className="text-xs text-amber-800 mt-1">
                   Your current role is <span className="font-mono font-bold">{currentUser?.role}</span>.
                   Executing refunds requires <span className="font-semibold">OWNER, ADMIN, or REVIEWER</span> privileges.
-                  Switch role using the top bar selector to test approval.
+                  Switch account persona from the top navigation to test authorization.
                 </p>
               </div>
             </div>
@@ -231,7 +231,7 @@ export const RefundModal: React.FC<RefundModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-slate-200 bg-slate-50">
+        <div className="flex items-center justify-between px-6 py-4 border-t border-slate-200 bg-slate-50 shrink-0">
           <button
             type="button"
             onClick={onClose}

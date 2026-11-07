@@ -264,8 +264,8 @@ export const PolicyManagerView: React.FC<PolicyManagerViewProps> = ({
       {/* Publish Modal */}
       {showPublishModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full overflow-hidden border border-slate-200">
-            <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden border border-slate-200">
+            <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between shrink-0">
               <h3 className="text-base font-bold">Publish New Immutable Policy Version</h3>
               <button
                 onClick={() => setShowPublishModal(false)}
@@ -275,7 +275,7 @@ export const PolicyManagerView: React.FC<PolicyManagerViewProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handlePublish} className="p-6 space-y-4 text-xs">
+            <form onSubmit={handlePublish} className="p-5 sm:p-6 space-y-4 text-xs overflow-y-auto flex-1">
               {!canPublish && (
                 <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700">
                   Permission Denied: Publishing policies requires OWNER or ADMIN role. Switch role in top bar.

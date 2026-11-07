@@ -118,25 +118,27 @@ export const CaseInboxView: React.FC<CaseInboxViewProps> = ({ cases, orders, onS
           />
         </div>
 
-        {/* Category Dropdown */}
-        <div className="flex items-center gap-2">
-          <Filter className="w-4 h-4 text-slate-400 shrink-0" />
-          <select
-            value={issueFilter}
-            onChange={(e) => setIssueFilter(e.target.value)}
-            className="px-3 py-2 border border-slate-200 rounded-lg text-xs text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
-          >
-            <option value="ALL">All Categories</option>
-            <option value="damaged_item">Damaged Item</option>
-            <option value="wrong_item">Wrong Item</option>
-            <option value="item_not_received">Item Not Received</option>
-          </select>
+        {/* Category & Sort Dropdowns */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5 flex-1 sm:flex-initial">
+            <Filter className="w-4 h-4 text-slate-400 shrink-0" />
+            <select
+              value={issueFilter}
+              onChange={(e) => setIssueFilter(e.target.value)}
+              className="w-full sm:w-auto px-3 py-2 border border-slate-200 rounded-lg text-xs text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+            >
+              <option value="ALL">All Categories</option>
+              <option value="damaged_item">Damaged Item</option>
+              <option value="wrong_item">Wrong Item</option>
+              <option value="item_not_received">Item Not Received</option>
+            </select>
+          </div>
 
           {/* Sort By */}
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value as 'date' | 'amount')}
-            className="px-3 py-2 border border-slate-200 rounded-lg text-xs text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+            className="flex-1 sm:flex-initial px-3 py-2 border border-slate-200 rounded-lg text-xs text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
           >
             <option value="date">Sort: Most Recent</option>
             <option value="amount">Sort: Highest Amount</option>
@@ -147,7 +149,7 @@ export const CaseInboxView: React.FC<CaseInboxViewProps> = ({ cases, orders, onS
       {/* Disputes Table */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
+          <table className="min-w-[850px] w-full text-left border-collapse">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-mono font-semibold text-slate-500 uppercase tracking-wider">
                 <th className="py-3 px-4">Case #</th>

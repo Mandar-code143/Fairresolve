@@ -1,31 +1,30 @@
 /**
  * FairResolve Client API & Session Management Service
- * Manages JWT/session token persistence and injects Authorization header.
+ *
+ * Implements HttpOnly cookie transmission via credentials: 'include',
+ * in-memory Bearer token fallback (without localStorage vulnerability),
+ * and automatic session restoration.
  */
 
-const TOKEN_KEY = 'fairresolve_session_token';
+let inMemoryToken: string | null = null;
 
 export function getAuthToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  return localStorage.getItem(TOKEN_KEY);
+  return inMemoryToken;
 }
 
-export function setAuthToken(token: string): void {
-  if (typeof window === 'undefined') return;
-  localStorage.setItem(TOKEN_KEY, token);
+export function setAuthToken(token: string | null): void {
+  inMemoryToken = token;
 }
 
 export function removeAuthToken(): void {
-  if (typeof window === 'undefined') return;
-  localStorage.removeItem(TOKEN_KEY);
+  inMemoryToken = null;
 }
 
 export async function apiFetch(endpoint: string, options: RequestInit = {}): Promise<Response> {
-  const token = getAuthToken();
   const headers = new Headers(options.headers || {});
 
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`);
+  if (inMemoryToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${inMemoryToken}`);
   }
 
   // Set Content-Type to application/json by default unless body is FormData or already defined
@@ -34,6 +33,7 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}): Pro
   }
 
   return fetch(endpoint, {
+    credentials: 'include', // Transmits HttpOnly cookie securely
     ...options,
     headers,
   });

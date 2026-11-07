@@ -20,6 +20,7 @@ import {
   Case,
   CaseEvent,
   EvidenceObject,
+  MerchantInvitation,
   Order,
   PayPalGatewayStatus,
   RefundAttempt,
@@ -50,10 +51,15 @@ export interface UserAccount extends User {
 export interface OutboxEvent {
   id: string;
   eventType: string;
+  tenantId?: string;
   payload: any;
   status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
   retryCount: number;
+  attempts?: number;
   idempotencyKey?: string;
+  lockedAt?: string;
+  lockedBy?: string;
+  nextAttemptAt?: string;
   createdAt: string;
   processedAt?: string;
   lastError?: string;
@@ -70,6 +76,7 @@ export interface DatabaseSchema {
   refundAttempts: Record<string, RefundAttempt>;
   auditEvents: CaseEvent[];
   outbox: OutboxEvent[];
+  invitations: Record<string, MerchantInvitation>;
 }
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -112,6 +119,7 @@ export class Database {
       refundAttempts: {},
       auditEvents: [],
       outbox: [],
+      invitations: {},
     };
   }
 
@@ -145,42 +153,53 @@ export class Database {
     };
     this.data.tenants[tenantApex.id] = tenantApex;
 
-    // Helper for password hashing (PBKDF2 SHA-512)
+    // Hardened password hashing (scrypt with N=16384, r=8, p=1, 64-byte key)
     const hashPw = (password: string, salt: string) => {
-      return crypto.pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
+      return crypto.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 }).toString('hex');
     };
 
-    // Pre-seed 4 demo users with known password: "Password123!"
+    // Pre-seed demo users across all 5 RBAC tiers with DEMO DATA labels
     const seedUsers = [
       {
         id: 'usr-01',
-        name: 'Sarah Lin',
-        email: 'sarah.lin@apexaudio.com',
+        name: 'Elena Rostova (Store Owner)',
+        email: 'owner@apexaudio.com',
         role: 'OWNER' as UserRole,
+        password: 'DemoOwner2026!',
       },
       {
         id: 'usr-02',
-        name: 'Marcus Vance',
-        email: 'marcus.vance@apexaudio.com',
-        role: 'REVIEWER' as UserRole,
+        name: 'Marcus Vance (Operations Admin)',
+        email: 'ops.lead@apexaudio.com',
+        role: 'ADMIN' as UserRole,
+        password: 'DemoAdmin2026!',
       },
       {
         id: 'usr-03',
-        name: 'Elena Rostova',
-        email: 'elena.rostova@apexaudio.com',
-        role: 'ANALYST' as UserRole,
+        name: 'Sarah Chen (Senior Dispute Reviewer)',
+        email: 'sarah.support@apexaudio.com',
+        role: 'REVIEWER' as UserRole,
+        password: 'DemoReviewer2026!',
       },
       {
         id: 'usr-04',
-        name: 'David Kim',
-        email: 'david.kim@apexaudio.com',
+        name: 'David Kalu (Risk Analyst)',
+        email: 'david.analyst@apexaudio.com',
+        role: 'ANALYST' as UserRole,
+        password: 'DemoAnalyst2026!',
+      },
+      {
+        id: 'usr-05',
+        name: 'Rachel Adams (Auditor / Viewer)',
+        email: 'auditor.extern@apexaudio.com',
         role: 'VIEWER' as UserRole,
+        password: 'DemoViewer2026!',
       },
     ];
 
     seedUsers.forEach((u) => {
-      const salt = crypto.randomBytes(16).toString('hex');
-      const hash = hashPw('Password123!', salt);
+      const salt = crypto.randomBytes(32).toString('hex');
+      const hash = hashPw(u.password, salt);
       this.data.users[u.id] = {
         id: u.id,
         name: u.name,
@@ -969,13 +988,44 @@ export class Database {
   get outbox() {
     return this.data.outbox;
   }
+  get invitations() {
+    if (!this.data.invitations) {
+      this.data.invitations = {};
+    }
+    return this.data.invitations;
+  }
 
   // -------------------------------------------------------------
-  // AUDIT LOGGING WITH CRYPTOGRAPHIC HASH CHAINING
+  // AUDIT LOGGING WITH CRYPTOGRAPHIC SHA-256 HASH CHAINING
   // -------------------------------------------------------------
   public appendAuditEvent(event: CaseEvent) {
+    const lastEvent = this.data.auditEvents[this.data.auditEvents.length - 1];
+    const previousHash = lastEvent?.currentHash || '0000000000000000000000000000000000000000000000000000000000000000';
+    const payload = `${previousHash}|${event.caseId}|${event.eventType}|${event.timestamp}|${JSON.stringify(event.details || {})}`;
+    event.previousHash = previousHash;
+    event.currentHash = crypto.createHash('sha256').update(payload).digest('hex');
+
     this.data.auditEvents.push(event);
     this.scheduleSave();
+  }
+
+  public verifyAuditChainIntegrity(): { isValid: boolean; checkedCount: number; brokenAtIndex?: number } {
+    const events = this.data.auditEvents;
+    for (let i = 0; i < events.length; i++) {
+      const e = events[i];
+      const prev = i > 0 ? events[i - 1].currentHash : '0000000000000000000000000000000000000000000000000000000000000000';
+      if (e.previousHash && e.previousHash !== prev) {
+        return { isValid: false, checkedCount: i, brokenAtIndex: i };
+      }
+      if (e.currentHash) {
+        const payload = `${e.previousHash || prev}|${e.caseId}|${e.eventType}|${e.timestamp}|${JSON.stringify(e.details || {})}`;
+        const recomputed = crypto.createHash('sha256').update(payload).digest('hex');
+        if (recomputed !== e.currentHash) {
+          return { isValid: false, checkedCount: i, brokenAtIndex: i };
+        }
+      }
+    }
+    return { isValid: true, checkedCount: events.length };
   }
 
   // -------------------------------------------------------------
