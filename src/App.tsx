@@ -96,25 +96,8 @@ export default function App() {
           const data = await res.json();
           setCurrentUser(data.user);
         } else {
-          // In development/demo, offer the login modal or default persona
-          const demoRes = await fetch('/api/v1/auth/demo-accounts');
-          if (demoRes.ok) {
-            const demoData = await demoRes.json();
-            // Default to REVIEWER persona if none is logged in so evaluator can test safe review
-            const reviewer = demoData.demoUsers?.find((u: any) => u.role === 'REVIEWER') || demoData.demoUsers?.[0];
-            if (reviewer) {
-              const loginRes = await fetch('/api/v1/auth/demo-login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userId: reviewer.id }),
-              });
-              if (loginRes.ok) {
-                const loginData = await loginRes.json();
-                setAuthToken(loginData.token);
-                setCurrentUser(loginData.user);
-              }
-            }
-          }
+          // No active session: ensure unauthenticated state without automatic login
+          setCurrentUser(null);
         }
       } catch (e) {
         console.error('Session initialization error:', e);

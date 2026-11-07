@@ -708,18 +708,29 @@ app.post(
       });
     }
 
+    // Concurrency lock: Reject if another refund attempt is currently in progress or awaiting reconciliation
+    const activePending = c.refundAttempts.find(
+      (a) => a.status === 'SUBMITTED' || a.status === 'PENDING' || a.status === 'UNKNOWN' || a.status === 'RECONCILIATION_REQUIRED'
+    );
+    if (activePending) {
+      return res.status(409).json({
+        error: `A refund attempt (${activePending.id}) is already in progress or awaiting reconciliation for this case.`,
+        refundAttempt: activePending,
+      });
+    }
+
     // Strict idempotency check
     const key = idempotencyKey || `FR-PPR-${c.id}-${Date.now()}`;
-    const existingAttempt = c.refundAttempts.find(
-      (a) => a.idempotencyKey === key && a.status === 'SUCCEEDED'
-    );
+    const existingAttempt = c.refundAttempts.find((a) => a.idempotencyKey === key);
     if (existingAttempt) {
-      return res.json({
-        success: true,
-        refundAttempt: existingAttempt,
-        case: c,
-        isDuplicateSubmission: true,
-      });
+      if (existingAttempt.status === 'SUCCEEDED' || existingAttempt.status === 'PENDING') {
+        return res.json({
+          success: true,
+          refundAttempt: existingAttempt,
+          case: c,
+          isDuplicateSubmission: true,
+        });
+      }
     }
 
     const refundRecord: RefundAttempt = {
@@ -817,6 +828,51 @@ app.post(
       db.scheduleSave();
       res.json({ success: true, refundAttempt: refundRecord, case: c, order });
     } catch (err: any) {
+      const isTimeoutOrNetworkError =
+        err.name === 'AbortError' ||
+        err.code === 'ECONNRESET' ||
+        err.code === 'ETIMEDOUT' ||
+        err.message?.toLowerCase().includes('timeout') ||
+        err.message?.toLowerCase().includes('network') ||
+        err.message?.toLowerCase().includes('fetch failed');
+
+      if (isTimeoutOrNetworkError) {
+        refundRecord.status = 'RECONCILIATION_REQUIRED';
+        refundRecord.errorMessage = `Network or gateway timeout: ${err.message}. Enqueued for background reconciliation.`;
+        c.status = 'REFUND_PENDING';
+
+        const reconEvent: CaseEvent = {
+          id: `ev-log-${Date.now()}`,
+          caseId: c.id,
+          eventType: 'REFUND_EXECUTED',
+          actor: { type: 'PAYPAL_GATEWAY', name: 'PayPal Gateway Reconciliation' },
+          summary: `PayPal refund timed out or interrupted. Flagged for outbox reconciliation without blind retry: ${err.message}`,
+          details: { error: err.message, status: 'RECONCILIATION_REQUIRED', idempotencyKey: key },
+          timestamp: new Date().toISOString(),
+        };
+        c.timeline.push(reconEvent);
+        db.appendAuditEvent(reconEvent);
+
+        backgroundWorker.enqueue({
+          eventType: 'RECONCILE_PENDING_REFUND',
+          tenantId: c.tenantId,
+          payload: {
+            caseId: c.id,
+            refundAttemptId: refundRecord.id,
+            captureId: order.paypalCaptureId,
+            idempotencyKey: key,
+          },
+          runAfterSeconds: 30,
+        });
+        db.scheduleSave();
+
+        return res.status(202).json({
+          status: 'RECONCILIATION_REQUIRED',
+          message: 'PayPal response timed out. Operation enqueued for reconciliation; funds will not be double-charged.',
+          refundAttempt: refundRecord,
+        });
+      }
+
       refundRecord.status = 'FAILED';
       refundRecord.errorMessage = err.message || 'PayPal refund execution failed';
       c.status = 'REFUND_FAILED';
@@ -1444,6 +1500,16 @@ app.post('/api/v1/paypal/verify', requireAuth, async (_req: AuthenticatedRequest
 
 // PayPal Webhooks endpoint with cryptographic signature verification
 app.post('/api/v1/webhooks/paypal', async (req, res) => {
+  const eventId = req.body?.id;
+  if (!eventId) {
+    return res.status(400).json({ error: 'Missing PayPal webhook event id' });
+  }
+
+  // Deduplication: A repeated event ID must not be processed twice
+  if (db.isWebhookProcessed(eventId)) {
+    return res.status(200).json({ received: true, status: 'already_processed' });
+  }
+
   const authAlgo = req.headers['paypal-auth-algo'] as string;
   const certUrl = req.headers['paypal-cert-url'] as string;
   const transmissionId = req.headers['paypal-transmission-id'] as string;
@@ -1462,15 +1528,18 @@ app.post('/api/v1/webhooks/paypal', async (req, res) => {
   });
 
   if (!isValid) {
-    console.warn('[Webhook] Rejected untrusted PayPal webhook signature');
+    console.warn(`[Webhook] Rejected untrusted PayPal webhook signature for event ${eventId}`);
     return res.status(400).json({ error: 'Invalid PayPal webhook signature' });
   }
+
+  db.markWebhookProcessed(eventId);
 
   // Enqueue webhook for durable processing
   backgroundWorker.enqueue({
     eventType: 'PAYPAL_WEBHOOK_EVENT',
     tenantId: 'system',
     payload: {
+      eventId,
       eventType: req.body?.event_type,
       resource: req.body?.resource,
     },

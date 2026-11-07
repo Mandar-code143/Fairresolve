@@ -1,0 +1,62 @@
+name: CI Pipeline - FairResolve
+
+on:
+  push:
+    branches: [ "main", "antigravity/**" ]
+  pull_request:
+    branches: [ "main" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Lint, Test & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript Static Typecheck
+        run: pnpm run lint
+
+      - name: Automated Security & Regression Tests
+        run: pnpm test
+
+      - name: Production Build (Frontend & Backend)
+        run: pnpm run build
+
+      - name: Verify Compiled Server Artifact
+        run: node -c dist/server.js
+
+  docker-lint:
+    name: Docker Configuration Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Dockerfile Build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: fairresolve:ci-test

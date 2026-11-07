@@ -159,7 +159,7 @@ export interface RefundAttempt {
   amount: number;
   currency: string;
   reason: string;
-  status: 'PENDING' | 'SUBMITTED' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN';
+  status: 'PENDING' | 'SUBMITTED' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN' | 'RECONCILIATION_REQUIRED';
   paypalRefundId?: string;
   paypalResponse?: any;
   errorCode?: string;
