@@ -864,7 +864,23 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
     }
   }
 
-  // 3. Strict approval validation using consolidated approval service
+  // 3. Concurrency lock: Reject if another refund attempt is currently in progress or awaiting reconciliation
+  const activePending = c.refundAttempts.find(
+    (a) =>
+      a.status === 'RESERVED' ||
+      a.status === 'SUBMITTED' ||
+      a.status === 'PENDING' ||
+      a.status === 'UNKNOWN' ||
+      a.status === 'RECONCILIATION_REQUIRED'
+  );
+  if (activePending) {
+    return res.status(409).json({
+      error: 'A refund attempt (' + activePending.id + ') is already in progress or awaiting reconciliation for this case.',
+      refundAttempt: activePending,
+    });
+  }
+
+  // 4. Strict approval validation using consolidated approval service
   const validation = approvalService.validateApprovalForExecution(
     c,
     order,
@@ -891,23 +907,7 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
   });
   const fingerprint = crypto.createHash('sha256').update(fingerprintPayload).digest('hex');
 
-  // 5. Concurrency lock: Reject if another refund attempt is currently in progress or awaiting reconciliation
-  const activePending = c.refundAttempts.find(
-    (a) =>
-      a.status === 'RESERVED' ||
-      a.status === 'SUBMITTED' ||
-      a.status === 'PENDING' ||
-      a.status === 'UNKNOWN' ||
-      a.status === 'RECONCILIATION_REQUIRED'
-  );
-  if (activePending) {
-    return res.status(409).json({
-      error: `A refund attempt (${activePending.id}) is already in progress or awaiting reconciliation for this case.`,
-      refundAttempt: activePending,
-    });
-  }
-
-  // 6. Atomic Reservation
+  // 5. Atomic Reservation
   const refundRecord: RefundAttempt = {
     id: `ref-att-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     caseId: c.id,
@@ -1772,6 +1772,8 @@ async function startServer() {
   process.on('SIGINT', shutdown);
 }
 
-startServer();
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
 
 export { app };

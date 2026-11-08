@@ -252,6 +252,15 @@ export class PayPalGateway {
    * Refund Captured Payment (POST /v2/payments/captures/{capture_id}/refund)
    */
   public async refundCapture(params: RefundCaptureParams): Promise<RefundCaptureResult> {
+    if (!params.captureId || typeof params.captureId !== 'string' || !params.captureId.trim()) {
+      throw new Error('PayPal Refund failed: Missing required capture ID.');
+    }
+    if (params.amount === undefined || params.amount === null || isNaN(params.amount) || params.amount <= 0) {
+      throw new Error('PayPal Refund failed: Invalid or missing refund amount.');
+    }
+    if (!params.currency || typeof params.currency !== 'string' || !params.currency.trim() || params.currency.length !== 3) {
+      throw new Error('PayPal Refund failed: Missing or invalid currency code.');
+    }
     if (this.isConfigured() && !params.captureId.startsWith('SIM-SANDBOX-')) {
       const token = await this.getAccessToken();
       const payload: any = {
