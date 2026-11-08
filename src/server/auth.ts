@@ -16,6 +16,7 @@ import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { db, Session } from './database';
 import { User, UserRole } from '../types';
+import { permissionService, Permission as GranularPermission, ROLE_PERMISSIONS as GRANULAR_PERMISSIONS } from './permissions';
 
 export interface AuthenticatedRequest extends Request {
   user?: User;
@@ -24,7 +25,7 @@ export interface AuthenticatedRequest extends Request {
   csrfToken?: string;
 }
 
-export type Permission =
+export type LegacyPermission =
   | 'MANAGE_TEAM'
   | 'PUBLISH_POLICY'
   | 'REVIEW_CASE'
@@ -35,45 +36,18 @@ export type Permission =
   | 'VIEW_CASES'
   | 'MANAGE_INTEGRATIONS';
 
-const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
-  OWNER: [
-    'MANAGE_TEAM',
-    'PUBLISH_POLICY',
-    'REVIEW_CASE',
-    'AUTHORIZE_REFUND',
-    'EXECUTE_REFUND',
-    'RUN_AI_INVESTIGATION',
-    'VIEW_AUDIT_LOGS',
-    'VIEW_CASES',
-    'MANAGE_INTEGRATIONS',
-  ],
-  ADMIN: [
-    'MANAGE_TEAM',
-    'PUBLISH_POLICY',
-    'REVIEW_CASE',
-    'AUTHORIZE_REFUND',
-    'EXECUTE_REFUND',
-    'RUN_AI_INVESTIGATION',
-    'VIEW_AUDIT_LOGS',
-    'VIEW_CASES',
-    'MANAGE_INTEGRATIONS',
-  ],
-  REVIEWER: [
-    'REVIEW_CASE',
-    'AUTHORIZE_REFUND',
-    'RUN_AI_INVESTIGATION',
-    'VIEW_AUDIT_LOGS',
-    'VIEW_CASES',
-  ],
-  ANALYST: [
-    'RUN_AI_INVESTIGATION',
-    'VIEW_AUDIT_LOGS',
-    'VIEW_CASES',
-  ],
-  VIEWER: [
-    'VIEW_AUDIT_LOGS',
-    'VIEW_CASES',
-  ],
+export type Permission = GranularPermission | LegacyPermission;
+
+const LEGACY_MAP: Record<LegacyPermission, GranularPermission> = {
+  MANAGE_TEAM: 'team.invite',
+  PUBLISH_POLICY: 'policy.manage',
+  REVIEW_CASE: 'cases.approve',
+  AUTHORIZE_REFUND: 'refund.approve',
+  EXECUTE_REFUND: 'refund.execute',
+  RUN_AI_INVESTIGATION: 'cases.investigate',
+  VIEW_AUDIT_LOGS: 'audit.view',
+  VIEW_CASES: 'cases.view',
+  MANAGE_INTEGRATIONS: 'integration.manage',
 };
 
 export class AuthService {
@@ -208,11 +182,11 @@ export class AuthService {
   }
 
   /**
-   * Check if role has permission
+   * Check if role has permission (supports granular and legacy permission keys)
    */
   public hasPermission(role: UserRole, permission: Permission): boolean {
-    const permissions = ROLE_PERMISSIONS[role] || [];
-    return permissions.includes(permission);
+    const granularKey: GranularPermission = (LEGACY_MAP[permission as LegacyPermission] || permission) as GranularPermission;
+    return permissionService.hasPermission(role, granularKey);
   }
 }
 

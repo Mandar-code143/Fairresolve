@@ -90,6 +90,51 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
     }
   };
 
+  // Explicit approval for Four-Eyes separation of duties
+  const handleApproveRefund = async () => {
+    try {
+      const res = await apiFetch(`/api/v1/cases/${caseData.id}/approve-refund`, {
+        method: 'POST',
+        body: JSON.stringify({
+          notes: actionNotes || 'Approved refund recommendation',
+          amount:
+            caseData.policyEvaluation?.eligible_amount !== null &&
+            caseData.policyEvaluation?.eligible_amount !== undefined
+              ? caseData.policyEvaluation.eligible_amount
+              : order.refundableAmount,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        onUpdateCase(data.case);
+      } else {
+        alert(data.error || 'Failed to approve refund recommendation');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Network error approving refund');
+    }
+  };
+
+  // Case Assignment toggle
+  const handleToggleAssignToMe = async () => {
+    if (!currentUser) return;
+    const isAssignedToMe = caseData.assignedTo === currentUser.id;
+    try {
+      const res = await apiFetch(`/api/v1/cases/${caseData.id}/assign`, {
+        method: 'POST',
+        body: JSON.stringify({ assignedTo: isAssignedToMe ? '' : currentUser.id }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        onUpdateCase(data.case);
+      } else {
+        alert(data.error || 'Assignment update failed');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Error assigning case');
+    }
+  };
+
   // Copy customer portal link
   const handleCopyCustomerLink = () => {
     const url = `${window.location.origin}/portal/${caseData.customerAccessToken}`;
@@ -181,11 +226,32 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
               </h1>
               <CaseStatusBadge status={caseData.status} />
             </div>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Customer: <span className="font-medium text-slate-800">{caseData.customerName}</span> (
-              {caseData.customerEmail}) · Filed on{' '}
-              {new Date(caseData.createdAt).toLocaleDateString()}
-            </p>
+            <div className="flex flex-wrap items-center gap-2 mt-1">
+              <span className="text-xs text-slate-500">
+                Customer: <span className="font-medium text-slate-800">{caseData.customerName}</span> (
+                {caseData.customerEmail}) · Filed on{' '}
+                {new Date(caseData.createdAt).toLocaleDateString()}
+              </span>
+              <span className="text-slate-300">·</span>
+              {caseData.assignedToName ? (
+                <span className="inline-flex items-center gap-1 text-blue-700 bg-blue-50 px-2 py-0.5 rounded text-[11px] font-semibold border border-blue-200">
+                  Assigned: {caseData.assignedToName}
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 text-slate-500 bg-slate-100 px-2 py-0.5 rounded text-[11px]">
+                  Unassigned
+                </span>
+              )}
+              {currentUser && ['OWNER', 'ADMIN', 'REVIEWER'].includes(currentUser.role) && (
+                <button
+                  type="button"
+                  onClick={handleToggleAssignToMe}
+                  className="text-[11px] text-blue-600 hover:text-blue-800 underline font-medium"
+                >
+                  {caseData.assignedTo === currentUser.id ? 'Unassign from me' : 'Assign to me'}
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -200,13 +266,31 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
             Re-run AI & Policy
           </button>
 
-          {caseData.status !== 'REFUNDED' && (
+          {caseData.status === 'APPROVED_PENDING_REFUND' ? (
+            currentUser && caseData.activeApproval?.authorizedBy === currentUser.id ? (
+              <span
+                className="w-full sm:w-auto px-3.5 py-2 bg-amber-50 text-amber-800 border border-amber-200 text-xs font-semibold rounded-lg flex items-center justify-center gap-1.5"
+                title="Four-Eyes Control: The user who approved cannot execute the financial settlement"
+              >
+                <Lock className="w-3.5 h-3.5 text-amber-600" />
+                Dual-Control: Awaiting Independent Executor
+              </span>
+            ) : (
+              <button
+                onClick={() => setShowRefundModal(true)}
+                className="w-full sm:w-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-sm shadow-emerald-500/20 transition-colors flex items-center justify-center gap-1.5"
+              >
+                <CreditCard className="w-4 h-4" />
+                Execute PayPal Refund (${(caseData.activeApproval?.approvedAmount ?? order.refundableAmount).toFixed(2)})
+              </button>
+            )
+          ) : caseData.status !== 'REFUNDED' && (
             <button
-              onClick={() => setShowRefundModal(true)}
+              onClick={handleApproveRefund}
               className="w-full sm:w-auto px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg shadow-sm shadow-blue-500/20 transition-colors flex items-center justify-center gap-1.5"
             >
-              <CreditCard className="w-4 h-4" />
-              Authorize PayPal Refund
+              <ShieldCheck className="w-4 h-4" />
+              Approve Recommendation
             </button>
           )}
         </div>
@@ -692,6 +776,57 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
                     </div>
                   )}
                 </div>
+              ) : caseData.status === 'APPROVED_PENDING_REFUND' ? (
+                <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg space-y-3">
+                  <div className="flex items-start gap-2.5">
+                    <ShieldCheck className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+                    <div>
+                      <h4 className="font-bold text-blue-900 text-sm">
+                        Refund Approved — Awaiting Dual-Control Settlement
+                      </h4>
+                      <p className="text-xs text-blue-800 mt-1">
+                        Authorized for{' '}
+                        <strong className="font-mono">
+                          ${(caseData.activeApproval?.approvedAmount ?? order.refundableAmount).toFixed(2)}
+                        </strong>{' '}
+                        by{' '}
+                        <span className="font-medium">
+                          {caseData.activeApproval?.authorizedByName ||
+                            caseData.activeApproval?.authorizedBy ||
+                            'Reviewer'}
+                        </span>{' '}
+                        (
+                        <span className="font-mono">
+                          {caseData.activeApproval?.authorizedByRole || 'REVIEWER'}
+                        </span>
+                        ) on{' '}
+                        {caseData.activeApproval
+                          ? new Date(caseData.activeApproval.createdAt).toLocaleString()
+                          : 'Recent'}
+                        .
+                      </p>
+                    </div>
+                  </div>
+
+                  {currentUser?.id === caseData.activeApproval?.authorizedBy ? (
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs">
+                      <span className="font-semibold block mb-0.5">Four-Eyes Control Guard:</span>
+                      You authorized this refund recommendation. Under fintech separation-of-duties
+                      policy, an independent Owner or Admin must execute the financial transaction.
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        onClick={() => setShowRefundModal(true)}
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm shadow-emerald-500/20"
+                      >
+                        <CreditCard className="w-3.5 h-3.5" />
+                        Execute PayPal Sandbox Settlement ($
+                        {(caseData.activeApproval?.approvedAmount ?? order.refundableAmount).toFixed(2)})
+                      </button>
+                    </div>
+                  )}
+                </div>
               ) : (
                 <>
                   <div>
@@ -710,11 +845,11 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
                   {/* Actions Grid */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
                     <button
-                      onClick={() => setShowRefundModal(true)}
+                      onClick={handleApproveRefund}
                       className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-xs transition-colors flex items-center justify-center gap-1 shadow-sm shadow-blue-500/20"
                     >
-                      <CreditCard className="w-3.5 h-3.5" />
-                      Approve & Refund
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      Approve Recommendation
                     </button>
                     <button
                       onClick={() => handleReviewAction('REQUEST_INFO')}

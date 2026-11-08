@@ -11,7 +11,8 @@
 import crypto from 'crypto';
 import { db, OutboxEvent } from './database';
 import { geminiService } from './geminiService';
-import { policyEngine } from './policyEngine';
+import { policyEngine, toCents, toDollars } from './policyEngine';
+import { paypalGateway } from './paypalGateway';
 import { CaseEvent } from '../types';
 
 export interface EnqueueOutboxOptions {
@@ -215,8 +216,71 @@ export class BackgroundWorker {
         break;
       }
 
+      case 'RECONCILE_PENDING_REFUND': {
+        const { caseId, refundAttemptId, captureId, idempotencyKey } = event.payload;
+        const c = db.cases[caseId];
+        if (!c) throw new Error(`Case ${caseId} not found for refund reconciliation`);
+
+        const order = db.orders[c.orderId];
+        if (!order) throw new Error(`Order ${c.orderId} not found for refund reconciliation`);
+
+        const attempt = c.refundAttempts.find((a) => a.id === refundAttemptId || a.idempotencyKey === idempotencyKey);
+        if (!attempt) throw new Error(`Refund attempt ${refundAttemptId} not found for reconciliation`);
+
+        // If already resolved, nothing to reconcile
+        if (attempt.status === 'SUCCEEDED' || attempt.status === 'FAILED') {
+          break;
+        }
+
+        try {
+          const captureInfo = await paypalGateway.getCapture(captureId || order.paypalCaptureId);
+          // In real Sandbox or simulation, verify capture status
+          if (captureInfo && captureInfo.status === 'COMPLETED') {
+            attempt.status = 'SUCCEEDED';
+            attempt.completedAt = new Date().toISOString();
+
+            const reqCents = toCents(attempt.amount);
+            const newRefundedCents = toCents(order.refundedAmount) + reqCents;
+            const grossCents = toCents(order.grossAmount);
+            const newRefundableCents = Math.max(0, grossCents - newRefundedCents);
+
+            order.refundedAmount = toDollars(newRefundedCents);
+            order.refundableAmount = toDollars(newRefundableCents);
+            order.status = newRefundableCents === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+            c.status = newRefundableCents === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+            c.updatedAt = new Date().toISOString();
+
+            const reconSuccessEvent: CaseEvent = {
+              id: `ev-log-${Date.now()}`,
+              caseId: c.id,
+              eventType: 'REFUND_RECONCILED',
+              actor: { type: 'PAYPAL_GATEWAY', name: 'Background Outbox Reconciler' },
+              summary: `Reconciled uncertain refund attempt ${attempt.id}. PayPal confirmed settled state.`,
+              details: { refundAttemptId: attempt.id, captureId, status: 'SUCCEEDED' },
+              timestamp: new Date().toISOString(),
+            };
+            c.timeline.push(reconSuccessEvent);
+            db.appendAuditEvent(reconSuccessEvent);
+            db.scheduleSave();
+          } else {
+            // Still pending clearance or unknown
+            throw new Error(`Capture ${captureId} is in status '${captureInfo?.status || 'UNKNOWN'}'`);
+          }
+        } catch (gatewayErr: any) {
+          // If we fail after max retries, mark as RECONCILIATION_REQUIRED and escalate
+          if ((event.attempts || 0) >= 4) {
+            attempt.status = 'RECONCILIATION_REQUIRED';
+            c.status = 'REFUND_UNKNOWN';
+            c.updatedAt = new Date().toISOString();
+            db.scheduleSave();
+          }
+          throw gatewayErr;
+        }
+        break;
+      }
+
       default:
-        console.log(`[Worker] Handled generic event: ${event.eventType}`);
+        throw new Error(`Unsupported or unknown outbox event type: ${event.eventType}`);
     }
   }
 }

@@ -24,6 +24,7 @@ import {
   MerchantInvitation,
   Order,
   PayPalGatewayStatus,
+  RefundApproval,
   RefundAttempt,
   RefundPolicy,
   Tenant,
@@ -75,6 +76,7 @@ export interface DatabaseSchema {
   cases: Record<string, Case>;
   policies: Record<string, RefundPolicy[]>;
   refundAttempts: Record<string, RefundAttempt>;
+  refundApprovals: Record<string, RefundApproval>;
   auditEvents: CaseEvent[];
   outbox: OutboxEvent[];
   invitations: Record<string, MerchantInvitation>;
@@ -120,10 +122,24 @@ export class Database {
         this.pgPool = new pg.Pool({ connectionString: dbUrl, max: 10 });
         const client = await this.pgPool.connect();
         try {
-          const schemaPath = path.resolve(__dirname, 'database', 'schema.sql');
-          if (fs.existsSync(schemaPath)) {
-            const sql = fs.readFileSync(schemaPath, 'utf-8');
-            await client.query(sql);
+          // Verify or create schema migrations registry
+          await client.query(`
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+              version INT PRIMARY KEY,
+              name VARCHAR(255) NOT NULL,
+              applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+          `);
+
+          const res = await client.query('SELECT version FROM schema_migrations WHERE version = 1');
+          if (res.rows.length === 0) {
+            const schemaPath = path.resolve(__dirname, 'database', 'schema.sql');
+            if (fs.existsSync(schemaPath)) {
+              const sql = fs.readFileSync(schemaPath, 'utf-8');
+              await client.query(sql);
+              await client.query('INSERT INTO schema_migrations (version, name) VALUES (1, $1)', ['initial_relational_schema']);
+              console.log('[Database] Applied migration 1: initial_relational_schema');
+            }
           }
           this.isPostgresConnected = true;
           console.log('[Database] PostgreSQL connected and schema verified successfully.');
@@ -131,6 +147,10 @@ export class Database {
           client.release();
         }
       } catch (err: any) {
+        if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE === 'false') {
+          console.error('[Database] FATAL: Production PostgreSQL connection failed:', err.message);
+          throw new Error(`Production database connection failed: ${err.message}`);
+        }
         console.warn('[Database] PostgreSQL connection failed, operating with durable atomic persistence:', err.message);
         this.isPostgresConnected = false;
       }
@@ -163,6 +183,7 @@ export class Database {
       cases: {},
       policies: {},
       refundAttempts: {},
+      refundApprovals: {},
       auditEvents: [],
       outbox: [],
       invitations: {},
@@ -1027,6 +1048,12 @@ export class Database {
   }
   get refundAttempts() {
     return this.data.refundAttempts;
+  }
+  get refundApprovals() {
+    if (!this.data.refundApprovals) {
+      this.data.refundApprovals = {};
+    }
+    return this.data.refundApprovals;
   }
   get auditEvents() {
     return this.data.auditEvents;

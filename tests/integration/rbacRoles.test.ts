@@ -10,7 +10,8 @@ import {
   AuthenticatedRequest,
 } from '../../src/server/auth';
 import { db } from '../../src/server/database';
-import { UserRole } from '../../src/types';
+import { permissionService } from '../../src/server/permissions';
+import { UserRole, RefundApproval } from '../../src/types';
 
 describe('RBAC & Multi-Tenant Security Integration Tests', () => {
   let app: express.Express;
@@ -77,6 +78,42 @@ describe('RBAC & Multi-Tenant Security Integration Tests', () => {
       (req: AuthenticatedRequest, res: Response) => {
         const cases = Object.values(db.cases).filter((c) => c.tenantId === req.tenantId);
         res.json({ cases });
+      }
+    );
+
+    // 6. Protected Four-Eyes Execution
+    app.post(
+      '/api/v1/test/cases/:id/execute-refund',
+      requireAuth,
+      requireRoles(['OWNER', 'ADMIN']),
+      (req: AuthenticatedRequest, res: Response) => {
+        const c = db.cases[req.params.id];
+        if (!c || c.tenantId !== req.tenantId) {
+          return res.status(404).json({ error: 'Case not found' });
+        }
+        if (c.activeApproval && c.activeApproval.authorizedBy === req.user!.id) {
+          return res.status(403).json({
+            error: 'Separation of duties violation: Approver and executor must be different users.',
+          });
+        }
+        res.json({ success: true, message: 'Settlement executed' });
+      }
+    );
+
+    // 7. Case Retrieval with Permissions and Field-Level Redaction
+    app.get(
+      '/api/v1/test/cases/:id',
+      requireAuth,
+      (req: AuthenticatedRequest, res: Response) => {
+        const c = db.cases[req.params.id];
+        if (!c || c.tenantId !== req.tenantId) {
+          return res.status(404).json({ error: 'Case not found' });
+        }
+        if (!permissionService.canAccessCase(req.user!, c)) {
+          return res.status(403).json({ error: 'Access denied: Analyst is not assigned to this case' });
+        }
+        const serialized = permissionService.serializeCase(c, req.user!);
+        res.json({ case: serialized });
       }
     );
   });
@@ -258,5 +295,170 @@ describe('RBAC & Multi-Tenant Security Integration Tests', () => {
       .send({ email: 'legitimate@apexaudio.com', role: 'ADMIN' });
 
     expect(resCsrfPassed.status).toBe(200);
+  });
+
+  it('enforces four-eyes financial control: approver cannot execute their own approved refund', async () => {
+    const ownerToken = createSessionForRole('OWNER');
+    const adminToken = createSessionForRole('ADMIN');
+
+    // Retrieve or setup test case
+    const caseId = 'case-four-eyes-01';
+    db.cases[caseId] = {
+      id: caseId,
+      tenantId: 'tenant-apex-101',
+      caseNumber: 'FR-4EYES-01',
+      orderId: 'ord-01',
+      orderNumber: 'APX-01',
+      paypalOrderId: 'PPO-01',
+      paypalCaptureId: 'CAP-01',
+      customerName: 'Alice Test',
+      customerEmail: 'alice@test.com',
+      status: 'APPROVED_PENDING_REFUND',
+      issueType: 'damaged_item',
+      requestedResolution: 'full_refund',
+      customerDescription: 'Broken on arrival',
+      customerAccessToken: 'tok-01',
+      tokenExpiresAt: new Date(Date.now() + 86400000).toISOString(),
+      evidence: [],
+      timeline: [],
+      refundAttempts: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Owner approves the refund (sets active approval with owner's ID)
+    const ownerUserId = 'usr-test-owner';
+    const approval: RefundApproval = {
+      id: 'appr-01',
+      caseId,
+      tenantId: 'tenant-apex-101',
+      orderId: 'ord-01',
+      captureId: 'CAP-01',
+      authorizedBy: ownerUserId,
+      authorizedByName: 'Test Owner',
+      authorizedByRole: 'OWNER',
+      approvedAmount: 50.0,
+      approvedAmountCents: 5000,
+      currency: 'USD',
+      policyVersion: '1.0',
+      status: 'ACTIVE',
+      createdAt: new Date().toISOString(),
+    };
+    db.cases[caseId].activeApproval = approval;
+
+    // 1. Same user (Owner who approved) attempts execution: 403 Forbidden (separation of duties violation)
+    const resSameUser = await supertest(app)
+      .post(`/api/v1/test/cases/${caseId}/execute-refund`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ amount: 50.0, idempotencyKey: 'IDEMP-4EYES-01' });
+
+    expect(resSameUser.status).toBe(403);
+    expect(resSameUser.body.error).toContain('Separation of duties violation');
+
+    // 2. Different user (Admin who did NOT approve) attempts execution: 200 OK
+    const resDifferentUser = await supertest(app)
+      .post(`/api/v1/test/cases/${caseId}/execute-refund`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ amount: 50.0, idempotencyKey: 'IDEMP-4EYES-02' });
+
+    expect(resDifferentUser.status).toBe(200);
+    expect(resDifferentUser.body.message).toBe('Settlement executed');
+  });
+
+  it('enforces field-level redaction for VIEWER role (masks customer PII, strips access tokens)', async () => {
+    const viewerToken = createSessionForRole('VIEWER');
+    const ownerToken = createSessionForRole('OWNER');
+
+    const caseId = 'case-redact-01';
+    db.cases[caseId] = {
+      id: caseId,
+      tenantId: 'tenant-apex-101',
+      caseNumber: 'FR-REDACT-01',
+      orderId: 'ord-01',
+      orderNumber: 'APX-01',
+      paypalOrderId: 'PPO-01',
+      paypalCaptureId: 'CAP-01',
+      customerName: 'Jonathan Mercer',
+      customerEmail: 'j.mercer@sandbox.test',
+      status: 'READY_FOR_REVIEW',
+      issueType: 'damaged_item',
+      requestedResolution: 'full_refund',
+      customerDescription: 'Secret customer notes',
+      customerAccessToken: 'sensitive-raw-portal-token-12345',
+      tokenExpiresAt: new Date(Date.now() + 86400000).toISOString(),
+      evidence: [],
+      timeline: [],
+      refundAttempts: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    // VIEWER request: Customer PII masked, customer access token completely stripped
+    const resViewer = await supertest(app)
+      .get(`/api/v1/test/cases/${caseId}`)
+      .set('Authorization', `Bearer ${viewerToken}`);
+
+    expect(resViewer.status).toBe(200);
+    expect(resViewer.body.case.customerName).toBe('J*** M***');
+    expect(resViewer.body.case.customerEmail).toContain('***');
+    expect(resViewer.body.case.customerAccessToken).toBe('');
+
+    // OWNER request: Unmasked raw PII and token intact
+    const resOwner = await supertest(app)
+      .get(`/api/v1/test/cases/${caseId}`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    expect(resOwner.status).toBe(200);
+    expect(resOwner.body.case.customerName).toBe('Jonathan Mercer');
+    expect(resOwner.body.case.customerEmail).toBe('j.mercer@sandbox.test');
+    expect(resOwner.body.case.customerAccessToken).toBe('sensitive-raw-portal-token-12345');
+  });
+
+  it('enforces analyst assignment scope: analysts cannot view cases assigned to another analyst', async () => {
+    const analystToken = createSessionForRole('ANALYST');
+    const analystUserId = 'usr-test-analyst';
+
+    const otherAnalystCaseId = 'case-analyst-other-01';
+    db.cases[otherAnalystCaseId] = {
+      id: otherAnalystCaseId,
+      tenantId: 'tenant-apex-101',
+      caseNumber: 'FR-ANALYST-01',
+      orderId: 'ord-01',
+      orderNumber: 'APX-01',
+      paypalOrderId: 'PPO-01',
+      paypalCaptureId: 'CAP-01',
+      customerName: 'Customer X',
+      customerEmail: 'x@test.com',
+      status: 'READY_FOR_REVIEW',
+      issueType: 'damaged_item',
+      requestedResolution: 'full_refund',
+      customerDescription: 'Issue description',
+      customerAccessToken: 'tok-x',
+      tokenExpiresAt: new Date(Date.now() + 86400000).toISOString(),
+      assignedTo: 'usr-other-analyst-999',
+      assignedToName: 'Other Analyst',
+      evidence: [],
+      timeline: [],
+      refundAttempts: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Attempting to access a case assigned to another analyst -> 403 Forbidden
+    const resDenied = await supertest(app)
+      .get(`/api/v1/test/cases/${otherAnalystCaseId}`)
+      .set('Authorization', `Bearer ${analystToken}`);
+
+    expect(resDenied.status).toBe(403);
+    expect(resDenied.body.error).toContain('Access denied');
+
+    // Assigning the case to this analyst -> 200 OK
+    db.cases[otherAnalystCaseId].assignedTo = analystUserId;
+    const resAllowed = await supertest(app)
+      .get(`/api/v1/test/cases/${otherAnalystCaseId}`)
+      .set('Authorization', `Bearer ${analystToken}`);
+
+    expect(resAllowed.status).toBe(200);
+    expect(resAllowed.body.case.id).toBe(otherAnalystCaseId);
   });
 });

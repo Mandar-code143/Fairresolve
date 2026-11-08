@@ -34,6 +34,30 @@ services:
       retries: 3
       start_period: 15s
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fairresolve-worker
+    command: ["node", "dist/worker.js"]
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PAYPAL_CLIENT_ID=${PAYPAL_CLIENT_ID:-}
+      - PAYPAL_CLIENT_SECRET=${PAYPAL_CLIENT_SECRET:-}
+      - PAYPAL_ENVIRONMENT=sandbox
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - DATABASE_URL=postgres://fairresolve:fairresolve_secret@postgres:5432/fairresolve
+    volumes:
+      - fairresolve_data:/app/data
+      - fairresolve_uploads:/app/private_uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+
   postgres:
     image: postgres:16-alpine
     container_name: fairresolve-postgres

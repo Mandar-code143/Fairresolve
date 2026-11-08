@@ -311,6 +311,56 @@ export class PayPalGateway {
   }
 
   /**
+   * Fetch Capture Details from PayPal Payments API (GET /v2/payments/captures/{capture_id})
+   */
+  public async getCapture(captureId: string): Promise<{ id: string; status: string; amount?: { value: string; currency_code: string } }> {
+    if (this.isConfigured() && !captureId.startsWith('SIM-') && !captureId.startsWith('CAP-SIM')) {
+      const token = await this.getAccessToken();
+      const res = await fetch(`${this.baseUrl}/v2/payments/captures/${captureId}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      if (!res.ok) {
+        throw new Error(`Failed to fetch capture ${captureId} from PayPal: ${res.statusText}`);
+      }
+      return await res.json();
+    }
+    return {
+      id: captureId,
+      status: 'COMPLETED',
+      amount: { value: '100.00', currency_code: 'USD' },
+    };
+  }
+
+  /**
+   * Fetch Refund Details from PayPal Payments API (GET /v2/payments/refunds/{refund_id})
+   */
+  public async getRefund(refundId: string): Promise<{ id: string; status: 'COMPLETED' | 'PENDING' | 'FAILED' | 'CANCELLED'; amount?: { value: string; currency_code: string } }> {
+    if (this.isConfigured() && !refundId.startsWith('SIM-')) {
+      const token = await this.getAccessToken();
+      const res = await fetch(`${this.baseUrl}/v2/payments/refunds/${refundId}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      if (!res.ok) {
+        throw new Error(`Failed to fetch refund ${refundId} from PayPal: ${res.statusText}`);
+      }
+      return await res.json();
+    }
+    return {
+      id: refundId,
+      status: 'COMPLETED',
+      amount: { value: '100.00', currency_code: 'USD' },
+    };
+  }
+
+  /**
    * Webhook Signature Verification (POST /v1/notifications/verify-webhook-signature)
    */
   public async verifyWebhookSignature(webhookData: {

@@ -34,18 +34,20 @@ export const RefundModal: React.FC<RefundModalProps> = ({
   const numericAmount = parseFloat(refundAmount) || 0;
   const isAmountValid = numericAmount > 0 && numericAmount <= order.refundableAmount;
 
-  // Authorization check
-  const isAuthorized =
-    currentUser && ['OWNER', 'ADMIN', 'REVIEWER'].includes(currentUser.role);
+  // Role and Four-Eyes financial separation checks
+  const isAuthorizedRole = currentUser && ['OWNER', 'ADMIN'].includes(currentUser.role);
+  const isApprover = !!(currentUser && caseData.activeApproval && caseData.activeApproval.authorizedBy === currentUser.id);
+  const isSeparationViolation = isApprover;
+  const canExecute = isAuthorizedRole && !isSeparationViolation;
 
   const handleExecuteRefund = async () => {
-    if (!isAmountValid || !confirmed || !isAuthorized) return;
+    if (!isAmountValid || !confirmed || !canExecute) return;
 
     setLoading(true);
     setErrorMessage(null);
 
     try {
-      const res = await apiFetch(`/api/v1/cases/${caseData.id}/refund`, {
+      const res = await apiFetch(`/api/v1/cases/${caseData.id}/execute-refund`, {
         method: 'POST',
         body: JSON.stringify({
           amount: numericAmount,
@@ -77,7 +79,7 @@ export const RefundModal: React.FC<RefundModalProps> = ({
               <CreditCard className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-base font-bold">Authorize PayPal Sandbox Refund</h3>
+              <h3 className="text-base font-bold">Execute PayPal Sandbox Refund</h3>
               <p className="text-xs text-slate-400 font-mono">
                 Case {caseData.caseNumber} · Capture {order.paypalCaptureId}
               </p>
@@ -94,8 +96,44 @@ export const RefundModal: React.FC<RefundModalProps> = ({
 
         {/* Body */}
         <div className="p-5 sm:p-6 space-y-5 overflow-y-auto flex-1">
-          {/* RBAC Warning if viewer */}
-          {!isAuthorized && (
+          {/* Active Approval Details */}
+          {caseData.activeApproval && (
+            <div className="p-3.5 bg-blue-50/70 border border-blue-200 rounded-lg flex items-start gap-3">
+              <ShieldCheck className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+              <div className="text-xs space-y-1">
+                <span className="font-semibold text-blue-900 block">
+                  Authorized Refund Approval (Policy v{caseData.activeApproval.policyVersion})
+                </span>
+                <p className="text-blue-800">
+                  Approved for <strong className="font-mono">${caseData.activeApproval.approvedAmount.toFixed(2)}</strong> by{' '}
+                  <span className="font-medium">{caseData.activeApproval.authorizedByName || caseData.activeApproval.authorizedBy}</span> (
+                  <span className="font-mono">{caseData.activeApproval.authorizedByRole || 'REVIEWER'}</span>) on{' '}
+                  {new Date(caseData.activeApproval.createdAt).toLocaleString()}.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Four-Eyes Violation Warning */}
+          {isSeparationViolation && (
+            <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+              <div>
+                <h4 className="text-sm font-semibold text-red-900">
+                  Separation of Duties Enforced (Four-Eyes Principle)
+                </h4>
+                <p className="text-xs text-red-800 mt-1">
+                  You approved this refund resolution. Under fintech dual-control safety standards,
+                  the approver cannot execute the payment settlement. An independent{' '}
+                  <span className="font-semibold">Owner</span> or <span className="font-semibold">Admin</span>{' '}
+                  must execute this financial transaction.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* RBAC Warning if unauthorized role */}
+          {!isAuthorizedRole && !isSeparationViolation && (
             <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
               <div>
@@ -104,8 +142,8 @@ export const RefundModal: React.FC<RefundModalProps> = ({
                 </h4>
                 <p className="text-xs text-amber-800 mt-1">
                   Your current role is <span className="font-mono font-bold">{currentUser?.role}</span>.
-                  Executing refunds requires <span className="font-semibold">OWNER, ADMIN, or REVIEWER</span> privileges.
-                  Switch account persona from the top navigation to test authorization.
+                  Executing PayPal financial settlements requires <span className="font-semibold">OWNER or ADMIN</span> privileges.
+                  Switch account persona from the top navigation to test execution.
                 </p>
               </div>
             </div>
@@ -243,9 +281,9 @@ export const RefundModal: React.FC<RefundModalProps> = ({
           <button
             type="button"
             onClick={handleExecuteRefund}
-            disabled={!confirmed || !isAmountValid || !isAuthorized || loading}
+            disabled={!confirmed || !isAmountValid || !canExecute || loading}
             className={`px-5 py-2.5 text-xs font-semibold rounded-lg text-white flex items-center gap-2 transition-colors ${
-              !confirmed || !isAmountValid || !isAuthorized || loading
+              !confirmed || !isAmountValid || !canExecute || loading
                 ? 'bg-slate-400 cursor-not-allowed'
                 : 'bg-blue-600 hover:bg-blue-700 shadow-sm shadow-blue-500/20'
             }`}

@@ -151,12 +151,37 @@ export interface RefundPolicy {
   description: string;
 }
 
+export interface RefundApproval {
+  id: string;
+  caseId: string;
+  tenantId: string;
+  orderId: string;
+  captureId: string;
+  authorizedBy: string; // Approver user ID (must differ from executor)
+  authorizedByName: string;
+  authorizedByRole: UserRole;
+  approvedAmount: number;
+  approvedAmountCents: number;
+  currency: string;
+  policyVersion: string;
+  policyEvaluationId?: string;
+  reason?: string;
+  notes?: string;
+  status: 'ACTIVE' | 'CONSUMED' | 'REVOKED' | 'EXPIRED';
+  createdAt: string;
+  consumedAt?: string;
+}
+
 export interface RefundAttempt {
   id: string;
   caseId: string;
   captureId: string;
+  approvalId?: string;
+  approverId?: string;
+  executorId?: string;
   idempotencyKey: string;
   amount: number;
+  amountCents?: number;
   currency: string;
   reason: string;
   status: 'PENDING' | 'SUBMITTED' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN' | 'RECONCILIATION_REQUIRED';
@@ -183,11 +208,14 @@ export interface CaseEvent {
     | 'AI_INVESTIGATION_COMPLETED'
     | 'POLICY_EVALUATED'
     | 'MERCHANT_REVIEWED'
+    | 'REFUND_APPROVED'
     | 'REFUND_AUTHORIZED'
     | 'REFUND_EXECUTED'
+    | 'REFUND_RECONCILED'
     | 'REFUND_FAILED'
     | 'STATUS_CHANGED'
     | 'NOTE_ADDED'
+    | 'CASE_ASSIGNED'
     | 'CUSTOMER_CONTACTED';
   actor: {
     type: 'MERCHANT' | 'CUSTOMER' | 'SYSTEM' | 'AI_ENGINE' | 'PAYPAL_GATEWAY';
@@ -221,10 +249,14 @@ export interface Case {
   evidence: EvidenceObject[];
   aiInvestigation?: AIInvestigationResult;
   policyEvaluation?: PolicyEvaluationResult;
+  activeApproval?: RefundApproval;
   refundAttempts: RefundAttempt[];
   timeline: CaseEvent[];
   merchantNotes?: string;
   assignedTo?: string;
+  assignedToName?: string;
+  assignedAt?: string;
+  assignedBy?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -253,4 +285,3 @@ export interface MerchantInvitation {
   createdAt: string;
   acceptedAt?: string;
 }
-
