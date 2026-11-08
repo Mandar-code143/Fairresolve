@@ -1,25 +1,24 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import express, { Response } from 'express';
+import { describe, it, expect, beforeEach, vi, afterEach, afterAll } from 'vitest';
 import supertest from 'supertest';
-import cookieParser from 'cookie-parser';
-import cors from 'cors';
 import crypto from 'crypto';
 import pg from 'pg';
+import { newDb } from 'pg-mem';
+import fs from 'fs';
+import path from 'path';
 
+// Import ACTUAL production Express app from server.ts — NO duplicate mock Express routes!
+import { app } from '../../server';
 import { db, Database, OutboxEvent } from '../../src/server/database';
-import { authService, requireAuth, requireRoles, requirePermission, AuthenticatedRequest } from '../../src/server/auth';
+import { authService } from '../../src/server/auth';
 import { approvalService } from '../../src/server/approvalService';
-import { permissionService } from '../../src/server/permissions';
 import { paypalGateway } from '../../src/server/paypalGateway';
-import { BackgroundWorker, backgroundWorker } from '../../src/server/worker';
-import { toCents, toDollars } from '../../src/server/policyEngine';
-import { Case, CaseEvent, Order, RefundApproval, RefundAttempt, User, UserRole } from '../../src/types';
+import { BackgroundWorker } from '../../src/server/worker';
+import { Case, Order, RefundAttempt, User, UserRole } from '../../src/types';
 
 describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
-  let app: express.Express;
   const tenantId = 'tenant-pfv-100';
 
-  // Seeded Users
+  // Seeded Users across all 5 RBAC tiers
   let ownerUser: User;
   let adminUser: User;
   let reviewerUser: User;
@@ -27,7 +26,7 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
   let analyst2: User;
   let viewerUser: User;
 
-  // Session Tokens
+  // Real Session Tokens
   let ownerToken: string;
   let adminToken: string;
   let reviewerToken: string;
@@ -40,27 +39,21 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    db.setPostgresConnected(false, undefined);
 
-    app = express();
-    app.use(express.json());
-    app.use(cookieParser());
+    // Clean up in-memory attempts, approvals, outbox and audit events across tests
+    for (const key of Object.keys(db.refundAttempts)) delete db.refundAttempts[key];
+    for (const key of Object.keys(db.refundApprovals)) delete db.refundApprovals[key];
+    db.outbox.length = 0;
 
-    // Strict CORS allowlist
-    const allowedOrigins = ['http://localhost:3000', 'http://127.0.0.1:3000'];
-    app.use(
-      cors({
-        origin: (origin, callback) => {
-          if (!origin) return callback(null, true);
-          if (allowedOrigins.includes(origin)) {
-            return callback(null, true);
-          }
-          return callback(new Error(`CORS blocked: Origin ${origin} is not allowed.`));
-        },
-        credentials: true,
-      })
-    );
+    // Ensure private_uploads directory and test evidence file exist for isolated testing
+    const uploadsDir = path.resolve(process.cwd(), 'private_uploads');
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+    fs.writeFileSync(path.join(uploadsDir, 'ev-pfv-01.jpg'), 'test-evidence-binary');
 
-    // Initialize Tenant
+    // 1. Initialize Tenant in authoritative database
     db.tenants[tenantId] = {
       id: tenantId,
       name: 'Practical Verification Labs',
@@ -69,7 +62,7 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
       createdAt: new Date().toISOString(),
     };
 
-    // Initialize Policy
+    // 2. Initialize Policy
     db.policies[tenantId] = [
       {
         version: 'v2.1',
@@ -87,7 +80,7 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
       },
     ];
 
-    // Seed 5 Users
+    // 3. Seed Users across all 5 RBAC tiers
     const createTestUser = (id: string, name: string, role: UserRole): { user: User; token: string } => {
       const u: User = { id, name, email: `${id}@pfv.test`, role, tenantId };
       db.users[id] = {
@@ -124,7 +117,7 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
     viewerUser = viewerData.user;
     viewerToken = viewerData.token;
 
-    // Seed Order ($200 gross)
+    // 4. Seed Verified PayPal Order ($200.00 Gross, $0 Refunded, $200.00 Refundable)
     testOrder = {
       id: 'ord-pfv-101',
       tenantId,
@@ -144,7 +137,7 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
     };
     db.orders[testOrder.id] = testOrder;
 
-    // Seed Case
+    // 5. Seed Case in READY_FOR_REVIEW without approval
     testCase = {
       id: 'case-pfv-101',
       tenantId,
@@ -182,321 +175,113 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
       updatedAt: new Date().toISOString(),
     };
     db.cases[testCase.id] = testCase;
-
-    // Mount Routes exactly mirroring production server.ts handlers
-    // 1. Case review & approval
-    app.post(
-      '/api/v1/cases/:id/review',
-      requireAuth,
-      requireRoles(['OWNER', 'ADMIN', 'REVIEWER']),
-      (req: AuthenticatedRequest, res: Response) => {
-        const { decision, reason, notes, requestedAmount } = req.body;
-        const c = db.cases[req.params.id];
-        if (!c || c.tenantId !== req.tenantId) return res.status(404).json({ error: 'Case not found' });
-        if (decision === 'APPROVE') {
-          try {
-            const result = approvalService.createRefundApproval({
-              caseId: c.id,
-              tenantId: c.tenantId,
-              approver: req.user!,
-              requestedAmount: requestedAmount ? parseFloat(requestedAmount) : undefined,
-              reason,
-              notes,
-            });
-            return res.json({ success: true, case: result.case, approval: result.approval });
-          } catch (err: any) {
-            return res.status(err.statusCode || 400).json({ error: err.message });
-          }
-        }
-        res.json({ success: true });
-      }
-    );
-
-    // 2. Refund execution
-    app.post(
-      '/api/v1/cases/:id/execute-refund',
-      requireAuth,
-      requireRoles(['OWNER', 'ADMIN']),
-      async (req: AuthenticatedRequest, res: Response) => {
-        const { amount, reason, idempotencyKey } = req.body;
-        const c = db.cases[req.params.id];
-        if (!c || c.tenantId !== req.tenantId) return res.status(404).json({ error: 'Case not found' });
-        const order = db.orders[c.orderId];
-        if (!order) return res.status(404).json({ error: 'Order not found' });
-
-        if (!idempotencyKey || typeof idempotencyKey !== 'string' || !idempotencyKey.trim()) {
-          return res.status(400).json({ error: 'Missing required idempotencyKey for refund execution' });
-        }
-        const key = idempotencyKey.trim();
-
-        // Idempotency check
-        const existing = c.refundAttempts.find((a) => a.idempotencyKey === key);
-        if (existing) {
-          const candidateAmountDollars =
-            amount !== undefined ? parseFloat(amount) : (c.activeApproval?.approvedAmount ?? order.refundableAmount);
-          const candidateAmountCents = toCents(candidateAmountDollars);
-          const candidatePayload = JSON.stringify({
-            caseId: c.id,
-            orderId: order.id,
-            captureId: order.paypalCaptureId,
-            amountCents: candidateAmountCents,
-            currency: order.currency,
-            reason: reason || c.activeApproval?.notes || existing.reason || '',
-          });
-          const candidateFingerprint = crypto.createHash('sha256').update(candidatePayload).digest('hex');
-
-          if (existing.requestFingerprint && existing.requestFingerprint !== candidateFingerprint) {
-            return res.status(422).json({
-              error: 'Idempotency key parameter mismatch: request parameters differ from original submission.',
-            });
-          }
-          return res.json({ success: true, isDuplicateSubmission: true, refundAttempt: existing });
-        }
-
-        // Check for concurrent in-flight attempts
-        const inProgress = c.refundAttempts.find((a) =>
-          ['RESERVED', 'SUBMITTED', 'PENDING', 'UNKNOWN', 'RECONCILIATION_REQUIRED'].includes(a.status)
-        );
-        if (inProgress) {
-          return res.status(409).json({ error: 'Refund attempt already in progress', refundAttempt: inProgress });
-        }
-
-        const validation = approvalService.validateApprovalForExecution(
-          c,
-          order,
-          req.user!,
-          amount !== undefined ? parseFloat(amount) : undefined
-        );
-        if (!validation.valid) {
-          return res.status(validation.statusCode || 400).json({ error: validation.error });
-        }
-
-        const execAmountDollars = validation.executableAmountDollars!;
-        const execAmountCents = validation.executableAmountCents!;
-        const approval = validation.approval!;
-
-        const fingerprintPayload = JSON.stringify({
-          caseId: c.id,
-          orderId: order.id,
-          captureId: order.paypalCaptureId,
-          amountCents: execAmountCents,
-          currency: order.currency,
-          reason: reason || approval.notes || '',
-        });
-        const fingerprint = crypto.createHash('sha256').update(fingerprintPayload).digest('hex');
-
-        const refundRecord: RefundAttempt = {
-          id: `ref-pfv-${Date.now()}`,
-          caseId: c.id,
-          approvalId: approval.id,
-          approverId: approval.authorizedBy,
-          executorId: req.user!.id,
-          captureId: order.paypalCaptureId,
-          idempotencyKey: key,
-          requestFingerprint: fingerprint,
-          amount: execAmountDollars,
-          amountCents: execAmountCents,
-          currency: order.currency,
-          reason: reason || 'Verified refund execution',
-          status: 'RESERVED',
-          authorizedBy: { userId: req.user!.id, userName: req.user!.name, userRole: req.user!.role },
-          createdAt: new Date().toISOString(),
-        };
-
-        c.status = 'REFUND_SUBMITTED';
-        c.refundAttempts.push(refundRecord);
-        refundRecord.status = 'SUBMITTED';
-
-        try {
-          const result = await paypalGateway.refundCapture({
-            captureId: order.paypalCaptureId,
-            amount: execAmountDollars,
-            currency: order.currency,
-            idempotencyKey: key,
-          });
-
-          if (result.status === 'COMPLETED') {
-            refundRecord.status = 'SUCCEEDED';
-            refundRecord.paypalRefundId = result.refundId;
-            approval.status = 'CONSUMED';
-
-            const newRefundedCents = toCents(order.refundedAmount) + execAmountCents;
-            const grossCents = toCents(order.grossAmount);
-            const newRefundableCents = Math.max(0, grossCents - newRefundedCents);
-
-            order.refundedAmount = toDollars(newRefundedCents);
-            order.refundableAmount = toDollars(newRefundableCents);
-            order.status = newRefundableCents === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
-            c.status = newRefundableCents === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
-
-            return res.json({ success: true, refundAttempt: refundRecord, case: c, order });
-          } else {
-            refundRecord.status = 'FAILED';
-            return res.status(400).json({ error: 'Refund failed with status: ' + result.status });
-          }
-        } catch (err: any) {
-          const isTimeoutOrNetworkError =
-            err.name === 'AbortError' ||
-            err.code === 'ECONNRESET' ||
-            err.code === 'ETIMEDOUT' ||
-            err.message?.toLowerCase().includes('timeout') ||
-            err.message?.toLowerCase().includes('network') ||
-            err.message?.toLowerCase().includes('fetch failed');
-
-          if (isTimeoutOrNetworkError) {
-            refundRecord.status = 'RECONCILIATION_REQUIRED';
-            refundRecord.errorMessage = `Network or gateway timeout: ${err.message}`;
-            c.status = 'REFUND_PENDING';
-
-            backgroundWorker.enqueue({
-              eventType: 'RECONCILE_PENDING_REFUND',
-              tenantId: c.tenantId,
-              payload: {
-                caseId: c.id,
-                refundAttemptId: refundRecord.id,
-                captureId: order.paypalCaptureId,
-                idempotencyKey: key,
-              },
-              runAfterSeconds: 30,
-            });
-
-            return res.status(202).json({
-              status: 'RECONCILIATION_REQUIRED',
-              message: 'Refund request timed out or received uncertain network state. Queued for outbox reconciliation.',
-              refundAttempt: refundRecord,
-            });
-          }
-
-          refundRecord.status = 'FAILED';
-          return res.status(500).json({ error: err.message, refundAttempt: refundRecord });
-        }
-      }
-    );
-
-    // 3. Orders view & PII redaction
-    app.get('/api/v1/orders', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-      const orders = Object.values(db.orders).filter((o) => o.tenantId === req.tenantId);
-      if (req.user?.role === 'VIEWER') {
-        const redacted = orders.map((o) => ({
-          ...o,
-          buyerName: permissionService.maskCustomerName(o.buyerName),
-          buyerEmail: permissionService.maskCustomerEmail(o.buyerEmail),
-        }));
-        return res.json({ orders: redacted });
-      }
-      res.json({ orders });
-    });
-
-    // 4. Case detail & scoping
-    app.get('/api/v1/cases/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-      const c = db.cases[req.params.id];
-      if (!c || c.tenantId !== req.tenantId) return res.status(404).json({ error: 'Case not found' });
-      if (!permissionService.canAccessCase(req.user!, c)) {
-        return res.status(403).json({ error: 'Access denied: You are not assigned to this case.' });
-      }
-      const serialized = permissionService.serializeCase(c, req.user!);
-      res.json({ case: serialized });
-    });
-
-    // 5. Evidence file download
-    app.get('/api/v1/evidence/:id/file', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-      if (req.user?.role === 'VIEWER' || !permissionService.hasPermission(req.user!.role, 'evidence.download')) {
-        return res.status(403).json({ error: 'Access denied: Role VIEWER cannot download evidence files.' });
-      }
-      res.json({ success: true, downloadAllowed: true });
-    });
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
   });
 
   // ===========================================================================
   // TEST 1: Refund without approval
   // ===========================================================================
-  it('Test 1: Refund without approval — rejects execution in READY_FOR_REVIEW without approval, zero PayPal calls', async () => {
-    testCase.status = 'READY_FOR_REVIEW';
-    testCase.activeApproval = undefined;
-    const initialAttemptsCount = testCase.refundAttempts.length;
-
+  it('Test 1: Refund without approval — backend strictly rejects refund execution when case is in READY_FOR_REVIEW without an active approval record', async () => {
     const paypalRefundSpy = vi.spyOn(paypalGateway, 'refundCapture');
 
+    // Attempt to execute refund via production route
     const res = await supertest(app)
       .post(`/api/v1/cases/${testCase.id}/execute-refund`)
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ amount: 50.0, idempotencyKey: 'IDEMP-TEST-01' });
+      .send({ amount: 50.0, idempotencyKey: 'IDEMP-NO-APPROVAL-01' });
 
-    // Assertions
+    // Must be rejected with 400 Bad Request
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain("Cannot refund case in 'READY_FOR_REVIEW' status");
-    expect(paypalRefundSpy).toHaveBeenCalledTimes(0);
-    expect(testCase.refundAttempts.length).toBe(initialAttemptsCount);
-    expect(testCase.refundAttempts.some((a) => a.status === 'SUCCEEDED')).toBe(false);
+    expect(res.body.error).toContain('APPROVED_PENDING_REFUND');
+
+    // PayPal API must NEVER have been called
+    expect(paypalRefundSpy).not.toHaveBeenCalled();
+
+    // No refund attempt recorded as successful
+    expect(testCase.refundAttempts.length).toBe(0);
+    expect(testOrder.refundedAmount).toBe(0.0);
+    expect(testOrder.refundableAmount).toBe(200.0);
   });
 
   // ===========================================================================
   // TEST 2: Four-eyes approval
   // ===========================================================================
-  it('Test 2: Four-eyes approval — approver cannot execute; second authorized user can execute up to approved amount', async () => {
-    // 1. User A (Reviewer) approves refund of $50
-    const approveRes = await supertest(app)
+  it('Test 2: Four-eyes approval — User A approves $50, self-execution is rejected, User B executes at most approved amount', async () => {
+    // 1. User A (Admin) approves refund of $50 via production review route
+    const resApprove = await supertest(app)
       .post(`/api/v1/cases/${testCase.id}/review`)
-      .set('Authorization', `Bearer ${reviewerToken}`)
-      .send({ decision: 'APPROVE', requestedAmount: 50.0, reason: 'Approved $50 damage credit' });
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ decision: 'APPROVE', requestedAmount: 50.0, reason: 'Valid physical damage verified' });
 
-    expect(approveRes.status).toBe(200);
+    expect(resApprove.status).toBe(200);
     expect(testCase.status).toBe('APPROVED_PENDING_REFUND');
+    expect(testCase.activeApproval).toBeDefined();
     expect(testCase.activeApproval?.approvedAmount).toBe(50.0);
-    expect(testCase.activeApproval?.authorizedBy).toBe(reviewerUser.id);
+    expect(testCase.activeApproval?.authorizedBy).toBe(adminUser.id);
 
-    // 2. User A attempts to execute the refund -> Rejected (403 Separation of duties)
-    const execUserARes = await supertest(app)
-      .post(`/api/v1/cases/${testCase.id}/execute-refund`)
-      .set('Authorization', `Bearer ${reviewerToken}`)
-      .send({ amount: 50.0, idempotencyKey: 'IDEMP-TEST-02-A' });
-
-    expect(execUserARes.status).toBe(403);
-
-    // 3. User B attempts to execute for MORE than $50 (e.g. $75) -> Rejected (400 Exceeds authorized amount)
-    const execExcessRes = await supertest(app)
+    // 2. User A attempts to execute the refund they approved -> Must be rejected (Four-Eyes Violation)
+    const resSelfExec = await supertest(app)
       .post(`/api/v1/cases/${testCase.id}/execute-refund`)
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ amount: 75.0, idempotencyKey: 'IDEMP-TEST-02-EXCESS' });
+      .send({ amount: 50.0, idempotencyKey: 'IDEMP-FOUR-EYES-SELF' });
 
-    expect(execExcessRes.status).toBe(400);
-    expect(execExcessRes.body.error).toContain('exceeds authorized approval amount');
+    expect(resSelfExec.status).toBe(403);
+    expect(resSelfExec.body.error).toMatch(/Separation of duties|Four-Eyes|approver cannot execute/i);
 
-    // 4. User B (Admin, different from User A) executes for approved $50 -> Accepted (200)
-    const execUserBRes = await supertest(app)
+    // 3. User B (Owner) attempts to execute more than approved $50 (e.g. $75) -> Must be rejected
+    const resOverAmount = await supertest(app)
       .post(`/api/v1/cases/${testCase.id}/execute-refund`)
-      .set('Authorization', `Bearer ${adminToken}`)
-      .send({ amount: 50.0, idempotencyKey: 'IDEMP-TEST-02-B' });
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ amount: 75.0, idempotencyKey: 'IDEMP-FOUR-EYES-OVER' });
 
-    expect(execUserBRes.status).toBe(200);
-    expect(execUserBRes.body.refundAttempt.status).toBe('SUCCEEDED');
-    expect(execUserBRes.body.refundAttempt.amount).toBe(50.0);
-    expect(testCase.activeApproval?.status).toBe('CONSUMED');
+    expect(resOverAmount.status).toBe(400);
+    expect(resOverAmount.body.error).toMatch(/exceeds authorized approval amount|exceeds approved amount/i);
+
+    // 4. User B (Owner) executes the approved $50 -> Accepted!
+    const paypalRefundSpy = vi.spyOn(paypalGateway, 'refundCapture').mockResolvedValueOnce({
+      refundId: 'REF-PAYPAL-FE-99',
+      status: 'COMPLETED',
+      amount: 50.0,
+      currency: 'USD',
+      createTime: new Date().toISOString(),
+      idempotencyKey: 'IDEMP-FOUR-EYES-VALID',
+      isSimulated: true,
+    });
+
+    const resValidExec = await supertest(app)
+      .post(`/api/v1/cases/${testCase.id}/execute-refund`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ amount: 50.0, idempotencyKey: 'IDEMP-FOUR-EYES-VALID' });
+
+    expect(resValidExec.status).toBe(200);
+    expect(resValidExec.body.success).toBe(true);
+    expect(resValidExec.body.refundAttempt.amount).toBe(50.0);
+    expect(resValidExec.body.refundAttempt.approverId).toBe(adminUser.id);
+    expect(resValidExec.body.refundAttempt.executorId).toBe(ownerUser.id);
+
+    // Balances updated accurately in integer minor units
     expect(testOrder.refundedAmount).toBe(50.0);
     expect(testOrder.refundableAmount).toBe(150.0);
+    expect(paypalRefundSpy).toHaveBeenCalledTimes(1);
   });
 
   // ===========================================================================
-  // TEST 3: Duplicate refund (Concurrency & Idempotency)
+  // TEST 3: Duplicate refund (Atomic Concurrency)
   // ===========================================================================
-  it('Test 3: Duplicate refund — concurrent submissions allow at most one operation, balance never negative', async () => {
-    // Seed approved case
+  it('Test 3: Duplicate refund — concurrent requests for the same case and capture result in at most one execution and non-negative balance', async () => {
+    // Approve refund of $100
     approvalService.createRefundApproval({
       caseId: testCase.id,
       tenantId,
       approver: reviewerUser,
       requestedAmount: 100.0,
-      reason: 'Partial refund authorized',
+      reason: 'Concurrence test approval',
     });
 
     const paypalRefundSpy = vi.spyOn(paypalGateway, 'refundCapture').mockImplementation(async (params) => {
-      await new Promise((r) => setTimeout(r, 25));
+      // Small artificial delay to force concurrency overlap
+      await new Promise((r) => setTimeout(r, 40));
       return {
-        refundId: 'SIM-REF-CONCUR',
+        refundId: `REF-${Date.now()}`,
         status: 'COMPLETED',
         amount: params.amount,
         currency: params.currency,
@@ -506,7 +291,7 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
       };
     });
 
-    // Submit two requests simultaneously with different keys
+    // Fire two requests simultaneously with different idempotency keys
     const req1 = supertest(app)
       .post(`/api/v1/cases/${testCase.id}/execute-refund`)
       .set('Authorization', `Bearer ${adminToken}`)
@@ -523,7 +308,7 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
     // One must succeed (200), the other must be rejected due to concurrent flight (409)
     expect(statuses).toEqual([200, 409]);
 
-    // Refundable balance must never become negative
+    // Financial integrity assertions
     expect(testOrder.refundableAmount).toBeGreaterThanOrEqual(0);
     expect(testOrder.refundedAmount).toBe(100.0);
     expect(testOrder.refundableAmount).toBe(100.0);
@@ -545,7 +330,7 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
     const initialRefunded = testOrder.refundedAmount;
     const initialRefundable = testOrder.refundableAmount;
 
-    // Simulate gateway timeout
+    // Simulate gateway network timeout
     vi.spyOn(paypalGateway, 'refundCapture').mockRejectedValueOnce(
       Object.assign(new Error('ETIMEDOUT: Connection to PayPal Sandbox timed out'), { code: 'ETIMEDOUT' })
     );
@@ -558,12 +343,12 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
     expect(res.status).toBe(202);
     expect(res.body.status).toBe('RECONCILIATION_REQUIRED');
 
-    // Balance remains unchanged
+    // Financial balance MUST NOT be decremented on uncertain state
     expect(testOrder.refundedAmount).toBe(initialRefunded);
     expect(testOrder.refundableAmount).toBe(initialRefundable);
     expect(testCase.status).toBe('REFUND_PENDING');
 
-    // Worker queue item verified
+    // Transactional outbox reconciler event queued
     const queuedOutbox = db.outbox.find((o) => o.eventType === 'RECONCILE_PENDING_REFUND');
     expect(queuedOutbox).toBeDefined();
     expect(queuedOutbox?.payload.caseId).toBe(testCase.id);
@@ -572,56 +357,111 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
   // ===========================================================================
   // TEST 5: PostgreSQL persistence
   // ===========================================================================
-  it('Test 5: PostgreSQL persistence — verifies user/case state in PostgreSQL and recovery after restart', async () => {
-    // Create standalone mock/adapter verification checking SQL table schema
-    const mockPgPool = {
-      query: vi.fn(async (sql: string, params?: any[]) => {
-        if (sql.includes('SELECT version FROM schema_migrations')) {
-          return { rows: [{ version: 1 }] };
-        }
-        if (sql.includes('SELECT * FROM cases')) {
-          return {
-            rows: [
-              {
-                id: 'case-pg-test-01',
-                case_number: 'FR-PG-01',
-                tenant_id: tenantId,
-                status: 'READY_FOR_REVIEW',
-                customer_name: 'Postgres Customer',
-              },
-            ],
-          };
-        }
-        return { rows: [], rowCount: 1 };
-      }),
-      connect: vi.fn(async () => ({
-        query: vi.fn(async () => ({ rows: [] })),
-        release: vi.fn(),
-      })),
-    };
+  it('Test 5: PostgreSQL persistence — verifies user/case registration in real PostgreSQL tables and recovery across restart', async () => {
+    // 1. Initialize real in-memory PostgreSQL engine via pg-mem
+    const memDb = newDb();
+    memDb.registerExtension('uuid-ossp', (schema) => {
+      schema.registerFunction({
+        name: 'uuid_generate_v4',
+        implementation: () => crypto.randomUUID(),
+      });
+    });
 
-    // Verify DB adapter query execution
-    const queryResult = await mockPgPool.query('SELECT * FROM cases WHERE id = $1', ['case-pg-test-01']);
-    expect(queryResult.rows.length).toBe(1);
-    expect((queryResult.rows[0] as any).customer_name).toBe('Postgres Customer');
+    const schemaCandidates = [
+      path.resolve(__dirname, '../../src/server/database/schema.sql'),
+      path.resolve(process.cwd(), 'src/server/database/schema.sql'),
+    ];
+    const schemaPath = schemaCandidates.find((p) => fs.existsSync(p));
+    expect(schemaPath).toBeDefined();
+    const schemaSql = fs.readFileSync(schemaPath!, 'utf-8');
+    memDb.public.none(schemaSql);
 
-    // Verify restart: In production mode without DATABASE_URL, restart fails safely rather than falling back to JSON
-    const origEnv = process.env.NODE_ENV;
-    const origDb = process.env.DATABASE_URL;
+    const pgPoolClass = memDb.adapters.createPg().Pool;
+    const pool = new pgPoolClass();
+
     try {
-      process.env.NODE_ENV = 'production';
-      delete process.env.DATABASE_URL;
-      expect(() => new Database()).toThrow('DATABASE_URL is required in production');
+      // Attach PostgreSQL pool to authoritative database
+      await db.initTestPostgres(pool);
+      expect(db.isPostgresActive()).toBe(true);
+
+      // 2. Register user via production API
+      const regRes = await supertest(app)
+        .post('/api/v1/auth/register')
+        .send({
+          name: 'Postgres Architect',
+          email: 'architect@pgtest.io',
+          password: 'SecurePostgres2026!',
+          companyName: 'Postgres Solutions Inc',
+        });
+
+      expect(regRes.status).toBe(200);
+      const registeredUserId = regRes.body.user.id;
+
+      // 3. Inspect ACTUAL PostgreSQL rows directly via SQL query
+      const userRowRes = await pool.query('SELECT * FROM users WHERE id = $1', [registeredUserId]);
+      expect(userRowRes.rows.length).toBe(1);
+      expect(userRowRes.rows[0].email).toBe('architect@pgtest.io');
+      expect(userRowRes.rows[0].role).toBe('OWNER');
+
+      // 4. Create and persist a new case row directly in PostgreSQL
+      const testCaseId = 'case-pg-persisted-1';
+      await pool.query(
+        `INSERT INTO cases (
+          id, tenant_id, case_number, order_id, order_number, paypal_order_id, paypal_capture_id,
+          customer_name, customer_email, status, issue_type, requested_resolution, customer_description
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        [
+          testCaseId,
+          regRes.body.user.tenantId,
+          'FR-PG-001',
+          testOrder.id,
+          testOrder.orderNumber,
+          testOrder.paypalOrderId,
+          testOrder.paypalCaptureId,
+          'Postgres Customer',
+          'pg.customer@test.io',
+          'READY_FOR_REVIEW',
+          'damaged_item',
+          'full_refund',
+          'Verified in real PostgreSQL tables',
+        ]
+      );
+
+      // Verify row was inserted into real PostgreSQL table
+      const caseRowRes = await pool.query('SELECT * FROM cases WHERE id = $1', [testCaseId]);
+      expect(caseRowRes.rows.length).toBe(1);
+      expect(caseRowRes.rows[0].customer_name).toBe('Postgres Customer');
+
+      // 5. Restart simulation: Instantiate fresh Database instance connected to the same PostgreSQL pool
+      const restartedDb = new Database();
+      await restartedDb.initTestPostgres(pool);
+
+      // Verify the registered user and case exist in the restarted instance directly from PostgreSQL
+      expect(restartedDb.users[registeredUserId]).toBeDefined();
+      expect(restartedDb.users[registeredUserId].email).toBe('architect@pgtest.io');
+      expect(restartedDb.cases[testCaseId]).toBeDefined();
+      expect(restartedDb.cases[testCaseId].customerName).toBe('Postgres Customer');
+
+      // 6. Verify production mode fail-closed behavior: without DATABASE_URL, restart throws
+      const origEnv = process.env.NODE_ENV;
+      const origDb = process.env.DATABASE_URL;
+      try {
+        process.env.NODE_ENV = 'production';
+        delete process.env.DATABASE_URL;
+        expect(() => new Database()).toThrow('DATABASE_URL is required in production');
+      } finally {
+        process.env.NODE_ENV = origEnv;
+        if (origDb) process.env.DATABASE_URL = origDb;
+      }
     } finally {
-      process.env.NODE_ENV = origEnv;
-      if (origDb) process.env.DATABASE_URL = origDb;
+      db.setPostgresConnected(false, undefined);
     }
   });
 
   // ===========================================================================
   // TEST 6: Role restrictions
   // ===========================================================================
-  it('Test 6: Role restrictions — verifies permissions for OWNER, ADMIN, REVIEWER, ANALYST, and VIEWER', async () => {
+  it('Test 6: Role restrictions — verifies permissions for OWNER, ADMIN, REVIEWER, ANALYST, and VIEWER on production routes', async () => {
     // 1. VIEWER cannot download evidence files
     const resViewerEvidence = await supertest(app)
       .get(`/api/v1/evidence/${testCase.evidence[0].id}/file`)
@@ -633,9 +473,9 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
       .get('/api/v1/orders')
       .set('Authorization', `Bearer ${viewerToken}`);
     expect(resViewerOrders.status).toBe(200);
-    const redOrder = resViewerOrders.body.orders.find((o: any) => o.id === testOrder.id);
-    expect(redOrder.buyerName).toContain('***');
-    expect(redOrder.buyerEmail).toContain('***');
+    const maskedOrder = resViewerOrders.body.orders.find((o: any) => o.id === testOrder.id);
+    expect(maskedOrder.buyerName).toContain('***');
+    expect(maskedOrder.buyerEmail).toContain('***');
 
     // 3. ANALYST cannot access case assigned to another analyst
     testCase.assignedTo = analyst1.id;
@@ -652,7 +492,7 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
       .send({ decision: 'APPROVE', requestedAmount: 50.0, reason: 'Reviewer approval valid' });
     expect(resReviewerApprove.status).toBe(200);
 
-    // 5. REVIEWER cannot execute (under Four-Eyes rule and execute-refund route)
+    // 5. REVIEWER cannot execute refunds (RBAC guard requires OWNER or ADMIN)
     const resReviewerExec = await supertest(app)
       .post(`/api/v1/cases/${testCase.id}/execute-refund`)
       .set('Authorization', `Bearer ${reviewerToken}`)
@@ -660,6 +500,16 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
     expect(resReviewerExec.status).toBe(403);
 
     // 6. ADMIN can execute when approved by REVIEWER
+    vi.spyOn(paypalGateway, 'refundCapture').mockResolvedValueOnce({
+      refundId: 'REF-PAYPAL-ADM-EXEC',
+      status: 'COMPLETED',
+      amount: 50.0,
+      currency: 'USD',
+      createTime: new Date().toISOString(),
+      idempotencyKey: 'IDEMP-ADM-EXEC',
+      isSimulated: true,
+    });
+
     const resAdminExec = await supertest(app)
       .post(`/api/v1/cases/${testCase.id}/execute-refund`)
       .set('Authorization', `Bearer ${adminToken}`)
@@ -670,33 +520,28 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
   // ===========================================================================
   // TEST 7: Security (CORS & CSRF)
   // ===========================================================================
-  it('Test 7: Security — blocks unauthorized cross-origin requests and rejects forged CSRF requests', async () => {
-    // 1. Cross-Origin block
+  it('Test 7: Security — blocks unauthorized cross-origin requests and rejects forged CSRF requests on production routes', async () => {
+    // 1. Cross-Origin block on production app
     const resCorsBlocked = await supertest(app)
       .get('/api/v1/orders')
       .set('Origin', 'http://malicious-cross-origin.com')
       .set('Authorization', `Bearer ${adminToken}`);
     expect(resCorsBlocked.status).toBe(500);
 
-    // 2. CSRF block on mutating request with session cookie but missing custom header
-    const csrfApp = express();
-    csrfApp.use(express.json());
-    csrfApp.use(cookieParser());
-    csrfApp.post('/api/v1/csrf-test', requireAuth, (_req, res) => res.json({ success: true }));
-
-    const resCsrfBlocked = await supertest(csrfApp)
-      .post('/api/v1/csrf-test')
+    // 2. CSRF block on mutating production route authenticated via cookie without anti-CSRF header
+    const resCsrfBlocked = await supertest(app)
+      .post(`/api/v1/cases/${testCase.id}/review`)
       .set('Cookie', `fairresolve_session=${adminToken}`)
-      .send({ action: 'transfer' });
+      .send({ decision: 'APPROVE', requestedAmount: 50.0 });
     expect(resCsrfBlocked.status).toBe(403);
     expect(resCsrfBlocked.body.error).toContain('CSRF verification failed');
 
-    // Legitimate request with X-Requested-With header passes
-    const resCsrfAllowed = await supertest(csrfApp)
-      .post('/api/v1/csrf-test')
+    // 3. Legitimate request with X-Requested-With header passes CSRF verification
+    const resCsrfAllowed = await supertest(app)
+      .post(`/api/v1/cases/${testCase.id}/review`)
       .set('Cookie', `fairresolve_session=${adminToken}`)
       .set('X-Requested-With', 'XMLHttpRequest')
-      .send({ action: 'transfer' });
+      .send({ decision: 'APPROVE', requestedAmount: 50.0, reason: 'CSRF header present' });
     expect(resCsrfAllowed.status).toBe(200);
   });
 
@@ -746,7 +591,6 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
     const origFetch = global.fetch;
     global.fetch = mockFetch;
     try {
-      // Mock isConfigured to true for live sandbox path
       vi.spyOn(paypalGateway, 'isConfigured').mockReturnValue(true);
       vi.spyOn(paypalGateway, 'getAccessToken').mockResolvedValue('test-token');
 
@@ -810,5 +654,9 @@ describe('FAIRRESOLVE — PRACTICAL FINAL VERIFICATION (Tests 1-9)', () => {
     const processed = await worker.pollAndProcess();
     expect(processed).toBe(1);
     expect(expiredLeaseEvent.status).toBe('COMPLETED');
+  });
+
+  afterAll(async () => {
+    db.setPostgresConnected(false, undefined);
   });
 });

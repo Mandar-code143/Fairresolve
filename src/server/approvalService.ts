@@ -154,6 +154,11 @@ export class ApprovalService {
     c.status = 'APPROVED_PENDING_REFUND';
     c.updatedAt = new Date().toISOString();
 
+    if (db.isPostgresActive()) {
+      db.saveRefundApprovalPg(approval).catch(() => {});
+      db.saveCasePg(c).catch(() => {});
+    }
+
     const approveEvent: CaseEvent = {
       id: `ev-log-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
       caseId: c.id,

@@ -322,6 +322,8 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     retry_count INT NOT NULL DEFAULT 0,
     max_retries INT NOT NULL DEFAULT 5,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    locked_at TIMESTAMPTZ,
+    locked_by VARCHAR(64),
     idempotency_key VARCHAR(128),
     correlation_id VARCHAR(128),
     last_error TEXT,

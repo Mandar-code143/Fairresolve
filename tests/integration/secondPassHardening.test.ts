@@ -35,6 +35,9 @@ describe('FairResolve Second-Pass Critical Defect & Hardening Integration Tests'
   let testCase: Case;
 
   beforeEach(() => {
+    db.outbox.length = 0;
+    Object.keys(db.refundApprovals).forEach((k) => delete db.refundApprovals[k]);
+    Object.keys(db.refundAttempts).forEach((k) => delete db.refundAttempts[k]);
     app = express();
     app.use(express.json());
     app.use(cookieParser());

@@ -164,6 +164,7 @@ export interface RefundApproval {
   approvedAmountCents: number;
   currency: string;
   policyVersion: string;
+  caseVersion?: string;
   policyEvaluationId?: string;
   reason?: string;
   notes?: string;
@@ -263,15 +264,28 @@ export interface Case {
   updatedAt: string;
 }
 
+export type PayPalVerificationStatus =
+  | 'MISSING_CREDENTIALS'
+  | 'CREDENTIALS_PRESENT_UNVERIFIED'
+  | 'SANDBOX_AUTHENTICATED'
+  | 'AUTHENTICATION_FAILED'
+  | 'SIMULATION_MODE';
+
 export interface PayPalGatewayStatus {
   environment: 'sandbox';
   isConfigured: boolean;
   clientIdMasked: string;
   liveEnabled: boolean;
+  verificationStatus: PayPalVerificationStatus;
   lastVerifiedAt?: string;
+  lastError?: string;
   activeOrderCount: number;
   refundCount: number;
+  genuineRefundCount: number;
+  simulatedRefundCount: number;
   totalRefundedGross: number;
+  genuineRefundedGross: number;
+  simulatedRefundedGross: number;
 }
 
 export interface MerchantInvitation {

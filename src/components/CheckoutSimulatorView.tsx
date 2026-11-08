@@ -35,6 +35,8 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [pendingOrderId, setPendingOrderId] = useState<string | null>(null);
   const [pendingOrderNumber, setPendingOrderNumber] = useState<string | null>(null);
+  const [pendingApproveUrl, setPendingApproveUrl] = useState<string | null>(null);
+  const [isSimulatedOrder, setIsSimulatedOrder] = useState<boolean>(false);
   const [result, setResult] = useState<{
     order: any;
     case: any;
@@ -86,6 +88,8 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
 
       setPendingOrderId(data.orderId);
       setPendingOrderNumber(data.orderNumber);
+      setPendingApproveUrl(data.approveUrl || null);
+      setIsSimulatedOrder(Boolean(data.isSimulated));
       setCheckoutStep('APPROVE');
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to initialize PayPal order');
@@ -278,6 +282,35 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
             </div>
           </div>
 
+          {pendingApproveUrl && (
+            <div className="p-3.5 bg-blue-50/70 border border-blue-200 rounded-lg text-xs space-y-2">
+              <div className="flex items-center justify-between font-semibold text-slate-900">
+                <span className="flex items-center gap-1.5">
+                  <CreditCard className="w-4 h-4 text-[#0070BA]" />
+                  <span>PayPal Buyer Approval Flow</span>
+                </span>
+                {pendingApproveUrl.startsWith('http') ? (
+                  <a
+                    href={pendingApproveUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[#0070BA] hover:underline font-bold"
+                  >
+                    <span>Authorize on PayPal Sandbox</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                ) : (
+                  <span className="text-amber-800 font-mono text-[11px] bg-amber-100 px-2 py-0.5 rounded">
+                    Simulated Approval Mode
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-500 font-mono truncate">
+                Redirect URL: {pendingApproveUrl}
+              </p>
+            </div>
+          )}
+
           <div className="space-y-3">
             <button
               onClick={handleCaptureApprovedOrder}
@@ -315,7 +348,36 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
               1. Select Test Merchandise
             </h2>
 
-            <div className="space-y-3">
+            {pendingApproveUrl && (
+            <div className="p-3.5 bg-blue-50/70 border border-blue-200 rounded-lg text-xs space-y-2">
+              <div className="flex items-center justify-between font-semibold text-slate-900">
+                <span className="flex items-center gap-1.5">
+                  <CreditCard className="w-4 h-4 text-[#0070BA]" />
+                  <span>PayPal Buyer Approval Flow</span>
+                </span>
+                {pendingApproveUrl.startsWith('http') ? (
+                  <a
+                    href={pendingApproveUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[#0070BA] hover:underline font-bold"
+                  >
+                    <span>Authorize on PayPal Sandbox</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                ) : (
+                  <span className="text-amber-800 font-mono text-[11px] bg-amber-100 px-2 py-0.5 rounded">
+                    Simulated Approval Mode
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-500 font-mono truncate">
+                Redirect URL: {pendingApproveUrl}
+              </p>
+            </div>
+          )}
+
+          <div className="space-y-3">
               {(Object.keys(products) as Array<keyof typeof products>).map((key) => {
                 const p = products[key];
                 const isSelected = selectedProduct === key;

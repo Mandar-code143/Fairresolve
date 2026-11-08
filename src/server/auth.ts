@@ -113,6 +113,9 @@ export class AuthService {
 
     db.sessions[session.id] = session;
     db.scheduleSave();
+    if (db.isPostgresActive()) {
+      db.saveSessionPg(session).catch((err) => console.warn('[Auth] Postgres session save error:', err.message));
+    }
 
     return { session, token, csrfToken };
   }
@@ -154,6 +157,9 @@ export class AuthService {
       if (s.tokenHash === tokenHash) {
         delete db.sessions[id];
         db.scheduleSave();
+        if (db.isPostgresActive()) {
+          db.query('UPDATE sessions SET is_revoked = true WHERE token_hash = $1', [tokenHash]).catch(() => {});
+        }
         return true;
       }
     }

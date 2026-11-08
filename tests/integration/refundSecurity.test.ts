@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express, { Response } from 'express';
 import supertest from 'supertest';
 import { db } from '../../src/server/database';
@@ -14,6 +14,19 @@ describe('Refund Security & Concurrency Hardening Integration Tests', () => {
   let testOrder: Order;
 
   beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.spyOn(paypalGateway, 'refundCapture').mockImplementation(async (params: any) => {
+      return {
+        refundId: `REF-${params.idempotencyKey || Date.now()}`,
+        status: 'COMPLETED',
+        amount: params.amount,
+        currency: params.currency,
+        createTime: new Date().toISOString(),
+        idempotencyKey: params.idempotencyKey,
+        isSimulated: true,
+      };
+    });
+
     app = express();
     app.use(express.json());
 

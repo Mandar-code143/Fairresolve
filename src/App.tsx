@@ -37,9 +37,14 @@ export default function App() {
     isConfigured: false,
     clientIdMasked: 'NOT_CONFIGURED',
     liveEnabled: false,
+    verificationStatus: 'SIMULATION_MODE',
     activeOrderCount: 0,
     refundCount: 0,
+    genuineRefundCount: 0,
+    simulatedRefundCount: 0,
     totalRefundedGross: 0,
+    genuineRefundedGross: 0,
+    simulatedRefundedGross: 0,
   });
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);

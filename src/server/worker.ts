@@ -89,6 +89,124 @@ export class BackgroundWorker {
    * Poll eligible outbox items and execute
    */
   public async pollAndProcess(): Promise<number> {
+    if (db.isPostgresActive() && db.getPgPool()) {
+      const pool = db.getPgPool()!;
+      const client = await pool.connect();
+      let candidateRow: any = null;
+      try {
+        await client.query('BEGIN');
+        const selectRes = await client.query(
+          `SELECT id, tenant_id, event_type, payload, status, retry_count, max_retries, attempts, next_attempt_at, locked_at, locked_by
+           FROM outbox_events
+           WHERE (status = 'PENDING' AND next_attempt_at <= CURRENT_TIMESTAMP)
+              OR (status = 'PROCESSING' AND locked_at < NOW() - INTERVAL '60 seconds')
+           ORDER BY next_attempt_at ASC
+           LIMIT 1
+           FOR UPDATE SKIP LOCKED`
+        );
+
+        if (selectRes.rows.length === 0) {
+          await client.query('COMMIT');
+          return 0;
+        }
+
+        candidateRow = selectRes.rows[0];
+        const newAttempts = (candidateRow.attempts || 0) + 1;
+        await client.query(
+          `UPDATE outbox_events
+           SET status = 'PROCESSING',
+               locked_at = CURRENT_TIMESTAMP,
+               locked_by = $1,
+               attempts = $2
+           WHERE id = $3`,
+          [this.workerId, newAttempts, candidateRow.id]
+        );
+        await client.query('COMMIT');
+        candidateRow.attempts = newAttempts;
+      } catch (claimErr: any) {
+        await client.query('ROLLBACK');
+        console.warn('[Worker] Lease lock acquisition error:', claimErr.message);
+        return 0;
+      } finally {
+        client.release();
+      }
+
+      const event: OutboxEvent = {
+        id: candidateRow.id,
+        eventType: candidateRow.event_type,
+        tenantId: candidateRow.tenant_id,
+        payload: typeof candidateRow.payload === 'string' ? JSON.parse(candidateRow.payload) : candidateRow.payload,
+        status: 'PROCESSING',
+        attempts: candidateRow.attempts,
+        retryCount: candidateRow.retry_count || 0,
+        createdAt: candidateRow.created_at ? new Date(candidateRow.created_at).toISOString() : new Date().toISOString(),
+      };
+
+      const memEvent = db.outbox.find((o) => o.id === event.id);
+      if (memEvent) {
+        memEvent.status = 'PROCESSING';
+        memEvent.attempts = event.attempts;
+        memEvent.lockedAt = new Date().toISOString();
+        memEvent.lockedBy = this.workerId;
+      }
+
+      try {
+        await this.processEvent(event);
+        await pool.query(
+          `UPDATE outbox_events
+           SET status = 'COMPLETED',
+               processed_at = CURRENT_TIMESTAMP,
+               locked_at = NULL,
+               locked_by = NULL,
+               last_error = NULL
+           WHERE id = $1`,
+          [event.id]
+        );
+        if (memEvent) {
+          memEvent.status = 'COMPLETED';
+          memEvent.processedAt = new Date().toISOString();
+          memEvent.lastError = undefined;
+        }
+      } catch (err: any) {
+        console.warn(`[Worker] Task ${event.id} (${event.eventType}) attempt ${event.attempts} failed:`, err.message);
+        if ((event.attempts || 0) >= 5) {
+          await pool.query(
+            `UPDATE outbox_events
+             SET status = 'FAILED',
+                 locked_at = NULL,
+                 locked_by = NULL,
+                 last_error = $1
+             WHERE id = $2`,
+            [`Exceeded max 5 attempts. Last error: ${err.message}`, event.id]
+          );
+          if (memEvent) {
+            memEvent.status = 'FAILED';
+            memEvent.lastError = `Exceeded max 5 attempts. Last error: ${err.message}`;
+          }
+        } else {
+          const backoffSeconds = Math.min(300, Math.pow(2, event.attempts || 1) * 2);
+          const nextTime = new Date(Date.now() + backoffSeconds * 1000);
+          await pool.query(
+            `UPDATE outbox_events
+             SET status = 'PENDING',
+                 locked_at = NULL,
+                 locked_by = NULL,
+                 next_attempt_at = $1,
+                 last_error = $2
+             WHERE id = $3`,
+            [nextTime, err.message, event.id]
+          );
+          if (memEvent) {
+            memEvent.status = 'PENDING';
+            memEvent.nextAttemptAt = nextTime.toISOString();
+            memEvent.lastError = err.message;
+          }
+        }
+      }
+
+      return 1;
+    }
+
     const now = new Date();
     const candidate = db.outbox.find((item) => {
       if (item.status === 'COMPLETED' || item.status === 'FAILED') return false;

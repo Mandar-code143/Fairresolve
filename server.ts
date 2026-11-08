@@ -235,7 +235,7 @@ app.post('/api/v1/auth/login', authLimiter, (req, res) => {
 });
 
 // Register New Merchant Owner
-app.post('/api/v1/auth/register', authLimiter, (req, res) => {
+app.post('/api/v1/auth/register', authLimiter, async (req, res) => {
   const { name, email, password, companyName } = req.body;
   if (!name || !email || !password || !companyName) {
     return res.status(400).json({ error: 'All fields are required' });
@@ -277,6 +277,8 @@ app.post('/api/v1/auth/register', authLimiter, (req, res) => {
     createdAt: new Date().toISOString(),
   };
   db.users[userId] = newUser;
+  await db.saveTenantPg(db.tenants[tenantId]);
+  await db.saveUserPg(newUser);
 
   // Initial default policy for new tenant
   db.policies[tenantId] = [
@@ -667,7 +669,7 @@ app.post(
   requireAuth,
   requireRoles(['OWNER', 'ADMIN', 'REVIEWER']),
   (req: AuthenticatedRequest, res: Response) => {
-    const { decision, reason, notes } = req.body;
+    const { decision, reason, notes, requestedAmount } = req.body;
     const c = db.cases[req.params.id];
     if (!c || c.tenantId !== req.tenantId) {
       return res.status(404).json({ error: 'Case not found' });
@@ -681,6 +683,7 @@ app.post(
           caseId: c.id,
           tenantId: c.tenantId,
           approver: user,
+          requestedAmount: requestedAmount !== undefined ? parseFloat(requestedAmount) : undefined,
           notes: notes || reason,
           reason,
         });
@@ -907,43 +910,33 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
   });
   const fingerprint = crypto.createHash('sha256').update(fingerprintPayload).digest('hex');
 
-  // 5. Atomic Reservation
-  const refundRecord: RefundAttempt = {
-    id: `ref-att-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-    caseId: c.id,
-    approvalId: approval.id,
-    approverId: approval.authorizedBy,
-    executorId: user.id,
-    captureId: order.paypalCaptureId,
-    idempotencyKey: key,
-    requestFingerprint: fingerprint,
-    amount: execAmountDollars,
-    amountCents: execAmountCents,
-    currency: order.currency,
-    reason: reason || approval.notes || 'Merchant authorized dispute resolution via FairResolve',
-    status: 'RESERVED',
-    authorizedBy: {
-      userId: user.id,
-      userName: user.name,
-      userRole: user.role,
-    },
-    createdAt: new Date().toISOString(),
-  };
-
-  c.status = 'REFUND_SUBMITTED';
-  c.refundAttempts.push(refundRecord);
-  db.refundAttempts[refundRecord.id] = refundRecord;
-  db.scheduleSave();
-
+  // 5. Cross-process atomic reservation transaction in PostgreSQL
+  let refundRecord: RefundAttempt;
   try {
-    await db.reserveRefundAttempt(refundRecord);
-  } catch (dbErr: any) {
-    if (dbErr.code === '23505' || dbErr.message?.includes('duplicate key')) {
-      return res.status(409).json({ error: 'Concurrent refund attempt detected with matching idempotency key.' });
-    }
+    const reservation = await db.reserveRefundTransaction({
+      caseId: c.id,
+      orderId: order.id,
+      tenantId: c.tenantId,
+      approvalId: approval.id,
+      approverId: approval.authorizedBy,
+      executorId: user.id,
+      captureId: order.paypalCaptureId,
+      idempotencyKey: key,
+      requestFingerprint: fingerprint,
+      amountCents: execAmountCents,
+      amountDollars: execAmountDollars,
+      currency: order.currency,
+      reason: reason || approval.notes || 'Merchant authorized dispute resolution via FairResolve',
+      user,
+    });
+    refundRecord = reservation.refundAttempt;
+  } catch (reserveErr: any) {
+    const statusCode = reserveErr.statusCode || (reserveErr.code === '23505' ? 409 : 500);
+    return res.status(statusCode).json({ error: reserveErr.message || 'Refund reservation failed' });
   }
 
   refundRecord.status = 'SUBMITTED';
+  await db.updateRefundAttemptState(refundRecord);
 
   try {
     const result = await paypalGateway.refundCapture({
@@ -1323,6 +1316,7 @@ app.post('/api/v1/paypal/orders', requireAuth, async (req: AuthenticatedRequest,
 
     res.json({
       orderId: result.orderId,
+      approveUrl: result.approveUrl,
       orderNumber,
       grossAmount,
       currency: 'USD',
