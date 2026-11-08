@@ -12,7 +12,9 @@ services:
     environment:
       - PORT=3000
       - NODE_ENV=production
-      - DEMO_MODE=${DEMO_MODE:-true}
+      - DEMO_MODE=${DEMO_MODE:-false}
+      - SERVICE_TYPE=app
+      - RUN_IN_PROCESS_WORKER=false
       - PAYPAL_CLIENT_ID=${PAYPAL_CLIENT_ID:-}
       - PAYPAL_CLIENT_SECRET=${PAYPAL_CLIENT_SECRET:-}
       - PAYPAL_WEBHOOK_ID=${PAYPAL_WEBHOOK_ID:-}
@@ -20,7 +22,7 @@ services:
       - PAYPAL_LIVE_ENABLED=false
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
-      - DATABASE_URL=postgres://fairresolve:fairresolve_secret@postgres:5432/fairresolve
+      - DATABASE_URL=postgres://${POSTGRES_USER:-fairresolve}:${POSTGRES_PASSWORD:-fairresolve_secret}@postgres:5432/${POSTGRES_DB:-fairresolve}
     volumes:
       - fairresolve_data:/app/data
       - fairresolve_uploads:/app/private_uploads
@@ -43,12 +45,13 @@ services:
     restart: unless-stopped
     environment:
       - NODE_ENV=production
+      - SERVICE_TYPE=worker
       - PAYPAL_CLIENT_ID=${PAYPAL_CLIENT_ID:-}
       - PAYPAL_CLIENT_SECRET=${PAYPAL_CLIENT_SECRET:-}
       - PAYPAL_ENVIRONMENT=sandbox
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
-      - DATABASE_URL=postgres://fairresolve:fairresolve_secret@postgres:5432/fairresolve
+      - DATABASE_URL=postgres://${POSTGRES_USER:-fairresolve}:${POSTGRES_PASSWORD:-fairresolve_secret}@postgres:5432/${POSTGRES_DB:-fairresolve}
     volumes:
       - fairresolve_data:/app/data
       - fairresolve_uploads:/app/private_uploads
@@ -63,16 +66,14 @@ services:
     container_name: fairresolve-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: fairresolve
-      POSTGRES_PASSWORD: fairresolve_secret
-      POSTGRES_DB: fairresolve
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-fairresolve}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fairresolve_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-fairresolve}
     volumes:
       - fairresolve_pgdata:/var/lib/postgresql/data
       - ./src/server/database/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fairresolve -d fairresolve"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fairresolve} -d ${POSTGRES_DB:-fairresolve}"]
       interval: 10s
       timeout: 5s
       retries: 5

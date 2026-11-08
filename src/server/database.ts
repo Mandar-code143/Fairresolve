@@ -112,11 +112,26 @@ export class Database {
       this.saveSync();
     }
 
-    this.initPostgres();
+    if (process.env.NODE_ENV === 'production' && (!process.env.DATABASE_URL || process.env.DATABASE_URL.trim() === '')) {
+      console.error('[Database] FATAL: Production environment requires DATABASE_URL to be configured.');
+      throw new Error('Production database connection failed: DATABASE_URL is required in production.');
+    }
+
+    this.initPostgres().catch((err) => {
+      if (process.env.NODE_ENV === 'production') {
+        console.error('[Database] Unhandled PostgreSQL connection error in production:', err);
+      }
+    });
   }
 
-  private async initPostgres() {
+  public async initPostgres() {
     const dbUrl = process.env.DATABASE_URL;
+
+    if (process.env.NODE_ENV === 'production' && (!dbUrl || dbUrl.trim() === '')) {
+      console.error('[Database] FATAL: Production environment requires DATABASE_URL to be configured.');
+      throw new Error('Production database connection failed: DATABASE_URL is required in production.');
+    }
+
     if (dbUrl && dbUrl.trim() !== '') {
       try {
         this.pgPool = new pg.Pool({ connectionString: dbUrl, max: 10 });
@@ -133,12 +148,18 @@ export class Database {
 
           const res = await client.query('SELECT version FROM schema_migrations WHERE version = 1');
           if (res.rows.length === 0) {
-            const schemaPath = path.resolve(__dirname, 'database', 'schema.sql');
-            if (fs.existsSync(schemaPath)) {
+            const candidates = [
+              path.resolve(__dirname, 'database', 'schema.sql'),
+              path.resolve(__dirname, '../src/server/database/schema.sql'),
+              path.resolve(process.cwd(), 'src/server/database/schema.sql'),
+              path.resolve(process.cwd(), 'dist/database/schema.sql'),
+            ];
+            const schemaPath = candidates.find((p) => fs.existsSync(p));
+            if (schemaPath) {
               const sql = fs.readFileSync(schemaPath, 'utf-8');
               await client.query(sql);
               await client.query('INSERT INTO schema_migrations (version, name) VALUES (1, $1)', ['initial_relational_schema']);
-              console.log('[Database] Applied migration 1: initial_relational_schema');
+              console.log('[Database] Applied migration 1: initial_relational_schema from ' + schemaPath);
             }
           }
           this.isPostgresConnected = true;
@@ -147,13 +168,92 @@ export class Database {
           client.release();
         }
       } catch (err: any) {
-        if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE === 'false') {
-          console.error('[Database] FATAL: Production PostgreSQL connection failed:', err.message);
+        if (process.env.NODE_ENV === 'production' || process.env.DATABASE_URL) {
+          console.error('[Database] FATAL: PostgreSQL connection failed:', err.message);
           throw new Error(`Production database connection failed: ${err.message}`);
         }
         console.warn('[Database] PostgreSQL connection failed, operating with durable atomic persistence:', err.message);
         this.isPostgresConnected = false;
       }
+    }
+  }
+
+  public async query(text: string, params?: any[]): Promise<pg.QueryResult<any>> {
+    if (!this.pgPool) {
+      throw new Error('PostgreSQL pool is not initialized');
+    }
+    return await this.pgPool.query(text, params);
+  }
+
+  public async withTransaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+    if (!this.pgPool) {
+      throw new Error('PostgreSQL pool is not initialized');
+    }
+    const client = await this.pgPool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Persist or reserve a refund attempt in PostgreSQL if active
+   */
+  public async reserveRefundAttempt(attempt: RefundAttempt): Promise<void> {
+    if (this.isPostgresConnected && this.pgPool) {
+      await this.pgPool.query(
+        `INSERT INTO refund_attempts (
+          id, case_id, tenant_id, approval_id, capture_id, idempotency_key,
+          amount_cents, currency, reason, status, authorized_by_user_id, is_simulated, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        [
+          attempt.id,
+          attempt.caseId,
+          this.data.cases[attempt.caseId]?.tenantId || 'tenant-apex-101',
+          attempt.approvalId || null,
+          attempt.captureId,
+          attempt.idempotencyKey,
+          attempt.amountCents || Math.round(attempt.amount * 100),
+          attempt.currency,
+          attempt.reason,
+          attempt.status,
+          attempt.authorizedBy.userId,
+          attempt.isSimulated || false,
+          attempt.createdAt,
+        ]
+      );
+    }
+  }
+
+  public async updateRefundAttemptState(attempt: RefundAttempt): Promise<void> {
+    if (this.isPostgresConnected && this.pgPool) {
+      await this.pgPool.query(
+        `UPDATE refund_attempts SET
+          status = $1,
+          paypal_refund_id = $2,
+          paypal_response = $3,
+          completed_at = $4,
+          error_code = $5,
+          error_message = $6,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $7`,
+        [
+          attempt.status,
+          attempt.paypalRefundId || null,
+          attempt.paypalResponse ? JSON.stringify(attempt.paypalResponse) : null,
+          attempt.completedAt || null,
+          attempt.errorCode || null,
+          attempt.errorMessage || null,
+          attempt.id,
+        ]
+      );
     }
   }
 
@@ -1080,6 +1180,31 @@ export class Database {
 
     this.data.auditEvents.push(event);
     this.scheduleSave();
+
+    if (this.isPostgresConnected && this.pgPool) {
+      this.pgPool.query(
+        `INSERT INTO audit_events (
+          id, tenant_id, case_id, event_type, actor_type, actor_id, actor_name, actor_role,
+          summary, details, previous_hash, current_hash, timestamp
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (id) DO NOTHING`,
+        [
+          event.id,
+          this.data.cases[event.caseId]?.tenantId || 'tenant-apex-101',
+          event.caseId,
+          event.eventType,
+          event.actor.type,
+          event.actor.id || null,
+          event.actor.name,
+          event.actor.role || null,
+          event.summary,
+          event.details ? JSON.stringify(event.details) : null,
+          event.previousHash,
+          event.currentHash,
+          event.timestamp,
+        ]
+      ).catch((err) => console.warn('[Database] Failed to insert audit event into Postgres:', err.message));
+    }
   }
 
   public verifyAuditChainIntegrity(): { isValid: boolean; checkedCount: number; brokenAtIndex?: number } {

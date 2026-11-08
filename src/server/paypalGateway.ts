@@ -207,14 +207,22 @@ export class PayPalGateway {
       }
 
       const capture = data.purchase_units?.[0]?.payments?.captures?.[0];
-      const captureStatus = (capture?.status || data.status || 'COMPLETED') as CaptureOrderResult['status'];
+      if (!capture || !capture.id) {
+        throw new Error('PayPal Capture Order failed: Provider response contains no valid capture ID.');
+      }
+
+      if (!capture.status && !data.status) {
+        throw new Error('PayPal Capture Order failed: Provider response contains no capture status.');
+      }
+
+      const captureStatus = (capture.status || data.status) as CaptureOrderResult['status'];
 
       return {
         orderId: data.id,
-        captureId: capture?.id || `CAP-${data.id}`,
+        captureId: capture.id,
         status: captureStatus,
-        grossAmount: parseFloat(capture?.amount?.value || '0'),
-        currency: capture?.amount?.currency_code || 'USD',
+        grossAmount: parseFloat(capture.amount?.value || '0'),
+        currency: capture.amount?.currency_code || 'USD',
         payerEmail: data.payer?.email_address,
         isSimulated: false,
         rawResponse: data,
@@ -272,6 +280,14 @@ export class PayPalGateway {
         );
       }
 
+      if (!data.id) {
+        throw new Error('PayPal Refund failed: Provider response contains no refund ID.');
+      }
+
+      if (!data.amount?.value || !data.amount?.currency_code) {
+        throw new Error('PayPal Refund failed: Provider response missing amount or currency.');
+      }
+
       const statusMap: Record<string, RefundCaptureResult['status']> = {
         COMPLETED: 'COMPLETED',
         PENDING: 'PENDING',
@@ -279,11 +295,13 @@ export class PayPalGateway {
         CANCELLED: 'FAILED',
       };
 
+      const refundStatus = statusMap[data.status] || 'UNKNOWN';
+
       return {
         refundId: data.id,
-        status: statusMap[data.status] || 'UNKNOWN',
-        amount: parseFloat(data.amount?.value || params.amount.toString()),
-        currency: data.amount?.currency_code || params.currency,
+        status: refundStatus,
+        amount: parseFloat(data.amount.value),
+        currency: data.amount.currency_code,
         createTime: data.create_time || new Date().toISOString(),
         idempotencyKey: params.idempotencyKey,
         isSimulated: false,
@@ -338,7 +356,13 @@ export class PayPalGateway {
   /**
    * Fetch Refund Details from PayPal Payments API (GET /v2/payments/refunds/{refund_id})
    */
-  public async getRefund(refundId: string): Promise<{ id: string; status: 'COMPLETED' | 'PENDING' | 'FAILED' | 'CANCELLED'; amount?: { value: string; currency_code: string } }> {
+  public async getRefund(refundId: string): Promise<{
+    id: string;
+    status: 'COMPLETED' | 'PENDING' | 'FAILED' | 'CANCELLED' | 'UNKNOWN';
+    amount?: { value: string; currency_code: string };
+    isSimulated: boolean;
+    rawResponse?: any;
+  }> {
     if (this.isConfigured() && !refundId.startsWith('SIM-')) {
       const token = await this.getAccessToken();
       const res = await fetch(`${this.baseUrl}/v2/payments/refunds/${refundId}`, {
@@ -351,12 +375,26 @@ export class PayPalGateway {
       if (!res.ok) {
         throw new Error(`Failed to fetch refund ${refundId} from PayPal: ${res.statusText}`);
       }
-      return await res.json();
+      const data = await res.json();
+      const statusMap: Record<string, 'COMPLETED' | 'PENDING' | 'FAILED' | 'CANCELLED'> = {
+        COMPLETED: 'COMPLETED',
+        PENDING: 'PENDING',
+        FAILED: 'FAILED',
+        CANCELLED: 'CANCELLED',
+      };
+      return {
+        id: data.id,
+        status: statusMap[data.status] || 'UNKNOWN',
+        amount: data.amount ? { value: data.amount.value, currency_code: data.amount.currency_code } : undefined,
+        isSimulated: false,
+        rawResponse: data,
+      };
     }
     return {
       id: refundId,
       status: 'COMPLETED',
       amount: { value: '100.00', currency_code: 'USD' },
+      isSimulated: true,
     };
   }
 

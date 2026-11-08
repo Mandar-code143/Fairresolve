@@ -41,10 +41,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Copy package manifests, pruned production node_modules, and compiled artifacts
+# Copy package manifests, pruned production node_modules, compiled artifacts, and schema
 COPY package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/src/server/database/schema.sql ./src/server/database/schema.sql
 
 # Create non-volatile data directories and set permissions for non-root node user
 RUN mkdir -p /app/data /app/private_uploads && chown -R node:node /app

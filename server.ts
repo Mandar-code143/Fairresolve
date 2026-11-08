@@ -35,6 +35,7 @@ import {
   AuthenticatedRequest,
 } from './src/server/auth';
 import { permissionService } from './src/server/permissions';
+import { approvalService } from './src/server/approvalService';
 import { paypalGateway } from './src/server/paypalGateway';
 import { geminiService } from './src/server/geminiService';
 import { policyEngine, toCents, toDollars } from './src/server/policyEngine';
@@ -62,9 +63,28 @@ app.use(
 );
 
 app.use(cookieParser());
+
+// Explicit CORS Origin Allowlist - rejects arbitrary unknown origins
+const defaultAllowedOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+];
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
+  : defaultAllowedOrigins;
+
 app.use(
   cors({
-    origin: true,
+    origin: (origin, callback) => {
+      // Allow non-browser requests (mobile, server-to-server, curl)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error(`CORS blocked: Origin ${origin} is not allowed by policy.`));
+    },
     credentials: true,
   })
 );
@@ -656,37 +676,26 @@ app.post(
     const user = req.user!;
 
     if (decision === 'APPROVE') {
-      c.status = 'APPROVED_PENDING_REFUND';
-      const order = db.orders[c.orderId];
-      if (order && !c.activeApproval) {
-        const approvedAmount =
-          c.policyEvaluation?.eligible_amount !== null && c.policyEvaluation?.eligible_amount !== undefined
-            ? c.policyEvaluation.eligible_amount
-            : order.refundableAmount;
-        const approval: RefundApproval = {
-          id: `appr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      try {
+        const result = approvalService.createRefundApproval({
           caseId: c.id,
           tenantId: c.tenantId,
-          orderId: order.id,
-          captureId: order.paypalCaptureId,
-          authorizedBy: user.id,
-          authorizedByName: user.name,
-          authorizedByRole: user.role,
-          approvedAmount,
-          approvedAmountCents: toCents(approvedAmount),
-          currency: order.currency,
-          policyVersion: c.policyEvaluation?.policy_version || '1.0',
-          status: 'ACTIVE',
-          createdAt: new Date().toISOString(),
-          notes: notes || reason || 'Approved during merchant case review',
-        };
-        db.refundApprovals[approval.id] = approval;
-        c.activeApproval = approval;
+          approver: user,
+          notes: notes || reason,
+          reason,
+        });
+        if (notes) result.case.merchantNotes = notes;
+        return res.json({ success: true, case: result.case, approval: result.approval });
+      } catch (err: any) {
+        return res.status(err.statusCode || 400).json({ error: err.message || 'Failed to approve case' });
       }
     } else if (decision === 'REJECT') {
-      c.status = 'REJECTED';
-      if (c.activeApproval) {
-        c.activeApproval.status = 'REVOKED';
+      try {
+        const updatedCase = approvalService.revokeApproval(c.id, c.tenantId, user, reason);
+        if (notes) updatedCase.merchantNotes = notes;
+        return res.json({ success: true, case: updatedCase });
+      } catch (err: any) {
+        return res.status(err.statusCode || 400).json({ error: err.message || 'Failed to revoke case' });
       }
     } else if (decision === 'REQUEST_INFO') {
       c.status = 'NEEDS_MORE_INFORMATION';
@@ -723,78 +732,20 @@ app.post(
   requireRoles(['OWNER', 'REVIEWER']),
   async (req: AuthenticatedRequest, res: Response) => {
     const { amount, notes, reason } = req.body;
-    const c = db.cases[req.params.id];
-    if (!c || c.tenantId !== req.tenantId) {
-      return res.status(404).json({ error: 'Case not found' });
-    }
-
-    const order = db.orders[c.orderId];
-    if (!order) return res.status(404).json({ error: 'Associated order not found' });
-
     const user = req.user!;
-    const approvedAmountDollars =
-      amount !== undefined
-        ? parseFloat(amount)
-        : (c.policyEvaluation?.eligible_amount !== null && c.policyEvaluation?.eligible_amount !== undefined
-            ? c.policyEvaluation.eligible_amount
-            : order.refundableAmount);
-
-    if (isNaN(approvedAmountDollars) || approvedAmountDollars <= 0) {
-      return res.status(400).json({ error: 'Invalid approved refund amount' });
-    }
-
-    const reqCents = toCents(approvedAmountDollars);
-    const refundableCents = toCents(order.refundableAmount);
-
-    if (reqCents > refundableCents) {
-      return res.status(400).json({
-        error: `Approved amount $${approvedAmountDollars.toFixed(2)} exceeds refundable order balance $${order.refundableAmount.toFixed(2)}`,
+    try {
+      const result = approvalService.createRefundApproval({
+        caseId: req.params.id,
+        tenantId: req.tenantId!,
+        approver: user,
+        requestedAmount: amount !== undefined ? parseFloat(amount) : undefined,
+        notes,
+        reason,
       });
+      res.json({ success: true, case: result.case, approval: result.approval });
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ error: err.message || 'Failed to approve refund' });
     }
-
-    const approval: RefundApproval = {
-      id: `appr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      caseId: c.id,
-      tenantId: c.tenantId,
-      orderId: order.id,
-      captureId: order.paypalCaptureId,
-      authorizedBy: user.id,
-      authorizedByName: user.name,
-      authorizedByRole: user.role,
-      approvedAmount: approvedAmountDollars,
-      approvedAmountCents: reqCents,
-      currency: order.currency,
-      policyVersion: c.policyEvaluation?.policy_version || '1.0',
-      status: 'ACTIVE',
-      createdAt: new Date().toISOString(),
-      notes: notes || reason || 'Refund authorization approved by merchant reviewer for settlement execution',
-    };
-
-    db.refundApprovals[approval.id] = approval;
-    c.activeApproval = approval;
-    c.status = 'APPROVED_PENDING_REFUND';
-    c.updatedAt = new Date().toISOString();
-
-    const approveEvent: CaseEvent = {
-      id: `ev-log-${Date.now()}`,
-      caseId: c.id,
-      eventType: 'REFUND_APPROVED',
-      actor: { type: 'MERCHANT', id: user.id, name: user.name, role: user.role },
-      summary: `Refund of $${approvedAmountDollars.toFixed(2)} ${order.currency} approved by ${user.name} (${user.role}). Awaiting financial execution under separation-of-duties.`,
-      details: {
-        approvalId: approval.id,
-        approvedAmount: approvedAmountDollars,
-        currency: order.currency,
-        approverId: user.id,
-        policyVersion: approval.policyVersion,
-      },
-      timestamp: new Date().toISOString(),
-    };
-    c.timeline.push(approveEvent);
-    db.appendAuditEvent(approveEvent);
-    db.scheduleSave();
-
-    res.json({ success: true, case: c, approval });
   }
 );
 
@@ -862,69 +813,88 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
     return res.status(404).json({ error: 'Case not found' });
   }
 
-  // Safety check: case must be in approved status before releasing funds
-  if (c.status !== 'APPROVED_PENDING_REFUND' && c.status !== 'READY_FOR_REVIEW') {
-    return res.status(400).json({
-      error: `Cannot refund case in '${c.status}' status. Merchant approval is required before settlement.`,
-    });
-  }
-
-  const user = req.user!;
-
-  // Strict Four-Eyes Separation of Duties enforcement:
-  // The person who approved the refund cannot execute the payment settlement.
-  if (c.activeApproval) {
-    if (c.activeApproval.status !== 'ACTIVE') {
-      return res.status(400).json({
-        error: `Active refund approval is in status '${c.activeApproval.status}'. A fresh approval is required.`,
-      });
-    }
-
-    if (c.activeApproval.authorizedBy === user.id) {
-      return res.status(403).json({
-        error:
-          'Separation of duties violation: The approver cannot execute their own approved refund. Another authorized Owner or Admin must execute this transaction.',
-      });
-    }
-  }
-
   const order = db.orders[c.orderId];
   if (!order) return res.status(404).json({ error: 'Associated order not found' });
 
-  // Validate idempotencyKey
-  const key = idempotencyKey?.trim() || `FR-PPR-${c.id}-${Date.now()}`;
-  if (!key) {
+  const user = req.user!;
+
+  // 1. Mandatory client idempotencyKey check (no generated fallback)
+  if (!idempotencyKey || typeof idempotencyKey !== 'string' || !idempotencyKey.trim()) {
     return res.status(400).json({ error: 'Missing required idempotencyKey for refund execution' });
   }
+  const key = idempotencyKey.trim();
 
-  const refundAmountDollars =
-    amount !== undefined
-      ? parseFloat(amount)
-      : (c.activeApproval?.approvedAmount ?? order.refundableAmount);
+  // 2. Check existing attempt with same idempotency key (deduplication & mismatch detection)
+  const existingAttempt =
+    c.refundAttempts.find((a) => a.idempotencyKey === key) ||
+    Object.values(db.refundAttempts).find((a) => a.idempotencyKey === key);
 
-  if (isNaN(refundAmountDollars) || refundAmountDollars <= 0) {
-    return res.status(400).json({ error: 'Invalid refund amount requested' });
-  }
-
-  // Integer minor units (cents) to avoid floating point imprecision
-  const reqCents = toCents(refundAmountDollars);
-  const refundableCents = toCents(order.refundableAmount);
-
-  if (reqCents > refundableCents) {
-    return res.status(400).json({
-      error: `Requested refund $${refundAmountDollars.toFixed(2)} exceeds remaining refundable balance $${order.refundableAmount.toFixed(2)}`,
+  if (existingAttempt) {
+    const candidateAmountDollars =
+      amount !== undefined ? parseFloat(amount) : (c.activeApproval?.approvedAmount ?? order.refundableAmount);
+    const candidateAmountCents = toCents(candidateAmountDollars);
+    const candidatePayload = JSON.stringify({
+      caseId: c.id,
+      orderId: order.id,
+      captureId: order.paypalCaptureId,
+      amountCents: candidateAmountCents,
+      currency: order.currency,
+      reason: reason || c.activeApproval?.notes || existingAttempt.reason || '',
     });
+    const candidateFingerprint = crypto.createHash('sha256').update(candidatePayload).digest('hex');
+
+    // Parameter mismatch: same idempotency key with different financial parameters
+    if (existingAttempt.requestFingerprint && existingAttempt.requestFingerprint !== candidateFingerprint) {
+      return res.status(422).json({
+        error: 'Idempotency key parameter mismatch: request parameters differ from original submission.',
+      });
+    }
+
+    if (
+      existingAttempt.status === 'SUCCEEDED' ||
+      existingAttempt.status === 'PENDING' ||
+      existingAttempt.status === 'SUBMITTED'
+    ) {
+      return res.json({
+        success: true,
+        refundAttempt: existingAttempt,
+        case: c,
+        isDuplicateSubmission: true,
+      });
+    }
   }
 
-  if (c.activeApproval && reqCents > c.activeApproval.approvedAmountCents) {
-    return res.status(400).json({
-      error: `Requested refund $${refundAmountDollars.toFixed(2)} exceeds authorized approval amount $${c.activeApproval.approvedAmount.toFixed(2)}`,
-    });
+  // 3. Strict approval validation using consolidated approval service
+  const validation = approvalService.validateApprovalForExecution(
+    c,
+    order,
+    user,
+    amount !== undefined ? parseFloat(amount) : undefined
+  );
+
+  if (!validation.valid) {
+    return res.status(validation.statusCode || 400).json({ error: validation.error });
   }
 
-  // Concurrency lock: Reject if another refund attempt is currently in progress or awaiting reconciliation
+  const execAmountDollars = validation.executableAmountDollars!;
+  const execAmountCents = validation.executableAmountCents!;
+  const approval = validation.approval!;
+
+  // 4. Request fingerprint calculation for the new reservation
+  const fingerprintPayload = JSON.stringify({
+    caseId: c.id,
+    orderId: order.id,
+    captureId: order.paypalCaptureId,
+    amountCents: execAmountCents,
+    currency: order.currency,
+    reason: reason || approval.notes || '',
+  });
+  const fingerprint = crypto.createHash('sha256').update(fingerprintPayload).digest('hex');
+
+  // 5. Concurrency lock: Reject if another refund attempt is currently in progress or awaiting reconciliation
   const activePending = c.refundAttempts.find(
     (a) =>
+      a.status === 'RESERVED' ||
       a.status === 'SUBMITTED' ||
       a.status === 'PENDING' ||
       a.status === 'UNKNOWN' ||
@@ -937,32 +907,21 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
     });
   }
 
-  // Strict idempotency check
-  const existingAttempt = c.refundAttempts.find((a) => a.idempotencyKey === key);
-  if (existingAttempt) {
-    if (existingAttempt.status === 'SUCCEEDED' || existingAttempt.status === 'PENDING') {
-      return res.json({
-        success: true,
-        refundAttempt: existingAttempt,
-        case: c,
-        isDuplicateSubmission: true,
-      });
-    }
-  }
-
+  // 6. Atomic Reservation
   const refundRecord: RefundAttempt = {
     id: `ref-att-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     caseId: c.id,
-    approvalId: c.activeApproval?.id,
-    approverId: c.activeApproval?.authorizedBy,
+    approvalId: approval.id,
+    approverId: approval.authorizedBy,
     executorId: user.id,
     captureId: order.paypalCaptureId,
     idempotencyKey: key,
-    amount: refundAmountDollars,
-    amountCents: reqCents,
+    requestFingerprint: fingerprint,
+    amount: execAmountDollars,
+    amountCents: execAmountCents,
     currency: order.currency,
-    reason: reason || c.activeApproval?.notes || 'Merchant authorized dispute resolution via FairResolve',
-    status: 'SUBMITTED',
+    reason: reason || approval.notes || 'Merchant authorized dispute resolution via FairResolve',
+    status: 'RESERVED',
     authorizedBy: {
       userId: user.id,
       userName: user.name,
@@ -973,15 +932,26 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
 
   c.status = 'REFUND_SUBMITTED';
   c.refundAttempts.push(refundRecord);
+  db.refundAttempts[refundRecord.id] = refundRecord;
   db.scheduleSave();
+
+  try {
+    await db.reserveRefundAttempt(refundRecord);
+  } catch (dbErr: any) {
+    if (dbErr.code === '23505' || dbErr.message?.includes('duplicate key')) {
+      return res.status(409).json({ error: 'Concurrent refund attempt detected with matching idempotency key.' });
+    }
+  }
+
+  refundRecord.status = 'SUBMITTED';
 
   try {
     const result = await paypalGateway.refundCapture({
       captureId: order.paypalCaptureId,
-      amount: refundAmountDollars,
+      amount: execAmountDollars,
       currency: order.currency,
       idempotencyKey: key,
-      noteToPayer: reason || c.activeApproval?.notes,
+      noteToPayer: reason || approval.notes,
     });
 
     if (result.status === 'COMPLETED') {
@@ -991,15 +961,15 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
       refundRecord.completedAt = result.createTime;
       refundRecord.isSimulated = result.isSimulated;
 
-      if (c.activeApproval) {
-        c.activeApproval.status = 'CONSUMED';
-        if (db.refundApprovals[c.activeApproval.id]) {
-          db.refundApprovals[c.activeApproval.id].status = 'CONSUMED';
-        }
+      approval.status = 'CONSUMED';
+      approval.consumedAt = new Date().toISOString();
+      if (db.refundApprovals[approval.id]) {
+        db.refundApprovals[approval.id].status = 'CONSUMED';
+        db.refundApprovals[approval.id].consumedAt = approval.consumedAt;
       }
 
       // Balance arithmetic in integer minor units
-      const newRefundedCents = toCents(order.refundedAmount) + reqCents;
+      const newRefundedCents = toCents(order.refundedAmount) + execAmountCents;
       const grossCents = toCents(order.grossAmount);
       const newRefundableCents = Math.max(0, grossCents - newRefundedCents);
 
@@ -1015,13 +985,13 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
         caseId: c.id,
         eventType: 'REFUND_EXECUTED',
         actor: { type: 'PAYPAL_GATEWAY', name: 'PayPal Sandbox Gateway' },
-        summary: `PayPal Sandbox refund of $${refundAmountDollars.toFixed(2)} ${order.currency} completed. Refund ID: ${result.refundId} ${result.isSimulated ? '(Simulated Mode)' : '(Live Sandbox)'}`,
+        summary: `PayPal Sandbox refund of $${execAmountDollars.toFixed(2)} ${order.currency} completed. Refund ID: ${result.refundId} ${result.isSimulated ? '(Simulated Mode)' : '(Live Sandbox)'}`,
         details: {
           refundId: result.refundId,
-          amount: refundAmountDollars,
+          amount: execAmountDollars,
           currency: order.currency,
           idempotencyKey: key,
-          approverId: c.activeApproval?.authorizedBy,
+          approverId: approval.authorizedBy,
           executorId: user.id,
           isSimulated: result.isSimulated,
         },
@@ -1029,8 +999,8 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
       };
       c.timeline.push(timelineEvent);
       db.appendAuditEvent(timelineEvent);
+      await db.updateRefundAttemptState(refundRecord);
     } else if (result.status === 'PENDING') {
-      // Pending status must NOT be marked succeeded
       refundRecord.status = 'PENDING';
       refundRecord.paypalRefundId = result.refundId;
       refundRecord.paypalResponse = result.rawResponse;
@@ -1049,10 +1019,12 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
       };
       c.timeline.push(pendingEvent);
       db.appendAuditEvent(pendingEvent);
+      await db.updateRefundAttemptState(refundRecord);
     } else {
       refundRecord.status = 'FAILED';
       c.status = 'REFUND_FAILED';
       c.updatedAt = new Date().toISOString();
+      await db.updateRefundAttemptState(refundRecord);
     }
 
     db.scheduleSave();
@@ -1095,11 +1067,11 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
         runAfterSeconds: 30,
       });
       db.scheduleSave();
+      await db.updateRefundAttemptState(refundRecord);
 
       return res.status(202).json({
         status: 'RECONCILIATION_REQUIRED',
-        message:
-          'PayPal response timed out. Operation enqueued for reconciliation; funds will not be double-charged.',
+        message: 'Refund request timed out or received uncertain network state. Queued for outbox reconciliation.',
         refundAttempt: refundRecord,
       });
     }
@@ -1107,6 +1079,9 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
     refundRecord.status = 'FAILED';
     refundRecord.errorMessage = err.message || 'PayPal refund execution failed';
     c.status = 'REFUND_FAILED';
+    c.updatedAt = new Date().toISOString();
+    db.scheduleSave();
+    await db.updateRefundAttemptState(refundRecord);
 
     const failEvent: CaseEvent = {
       id: `ev-log-${Date.now()}`,
@@ -1119,9 +1094,8 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
     };
     c.timeline.push(failEvent);
     db.appendAuditEvent(failEvent);
-    db.scheduleSave();
 
-    res.status(500).json({ error: err.message || 'PayPal refund rejected', refundAttempt: refundRecord });
+    return res.status(500).json({ error: err.message || 'PayPal refund rejected', refundAttempt: refundRecord });
   }
 };
 
@@ -1244,6 +1218,10 @@ app.get('/api/v1/evidence/:id/file', (req, res) => {
   if (rawToken) {
     const sessionValidation = authService.validateSessionToken(rawToken);
     if (sessionValidation && sessionValidation.session.tenantId === owningCase.tenantId) {
+      // Role VIEWER is explicitly blocked from downloading/viewing private raw evidence binaries
+      if (sessionValidation.user.role === 'VIEWER') {
+        return res.status(403).send('Access denied. Role VIEWER is not permitted to access raw evidence files.');
+      }
       authorized = true;
     }
   }
@@ -1274,7 +1252,36 @@ app.get('/api/v1/evidence/:id/file', (req, res) => {
 app.get('/api/v1/orders', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const orders = Object.values(db.orders).filter((o) => o.tenantId === req.tenantId);
   orders.sort((a, b) => new Date(b.transactionDate).getTime() - new Date(a.transactionDate).getTime());
+
+  if (req.user?.role === 'VIEWER') {
+    const redactedOrders = orders.map((o) => ({
+      ...o,
+      buyerName: permissionService.maskCustomerName(o.buyerName),
+      buyerEmail: permissionService.maskCustomerEmail(o.buyerEmail),
+    }));
+    return res.json({ orders: redactedOrders });
+  }
+
   res.json({ orders });
+});
+
+app.get('/api/v1/orders/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  const order = db.orders[req.params.id];
+  if (!order || order.tenantId !== req.tenantId) {
+    return res.status(404).json({ error: 'Order not found' });
+  }
+
+  if (req.user?.role === 'VIEWER') {
+    return res.json({
+      order: {
+        ...order,
+        buyerName: permissionService.maskCustomerName(order.buyerName),
+        buyerEmail: permissionService.maskCustomerEmail(order.buyerEmail),
+      },
+    });
+  }
+
+  res.json({ order });
 });
 
 // Catalog of demo products
@@ -1728,8 +1735,10 @@ app.get('/api/v1/audit/verify', requireAuth, (_req: AuthenticatedRequest, res: R
 // -------------------------------------------------------------
 
 async function startServer() {
-  // Start background worker
-  backgroundWorker.start();
+  // Start background worker only if not running standalone worker process
+  if (process.env.SERVICE_TYPE !== 'worker' && process.env.RUN_IN_PROCESS_WORKER !== 'false') {
+    backgroundWorker.start();
+  }
 
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
