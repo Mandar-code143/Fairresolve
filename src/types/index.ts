@@ -167,8 +167,9 @@ export interface RefundApproval {
   policyEvaluationId?: string;
   reason?: string;
   notes?: string;
-  status: 'ACTIVE' | 'CONSUMED' | 'REVOKED' | 'EXPIRED';
+  status: 'ACTIVE' | 'CONSUMED' | 'REVOKED' | 'EXPIRED' | 'SUPERSEDED';
   createdAt: string;
+  expiresAt: string;
   consumedAt?: string;
 }
 
@@ -180,11 +181,12 @@ export interface RefundAttempt {
   approverId?: string;
   executorId?: string;
   idempotencyKey: string;
+  requestFingerprint?: string;
   amount: number;
   amountCents?: number;
   currency: string;
   reason: string;
-  status: 'PENDING' | 'SUBMITTED' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN' | 'RECONCILIATION_REQUIRED';
+  status: 'RESERVED' | 'PENDING' | 'SUBMITTED' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN' | 'RECONCILIATION_REQUIRED';
   paypalRefundId?: string;
   paypalResponse?: any;
   errorCode?: string;

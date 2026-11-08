@@ -2,9 +2,9 @@ name: CI Pipeline - FairResolve
 
 on:
   push:
-    branches: [ "main", "antigravity/**" ]
+    branches: [ "main", "antigravity/**", "hardening/**" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "hardening/**" ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -43,6 +43,9 @@ jobs:
 
       - name: Verify Compiled Server Artifact
         run: node -c dist/server.js
+
+      - name: Verify Compiled Worker Artifact
+        run: node -c dist/worker.js
 
   docker-lint:
     name: Docker Configuration Lint

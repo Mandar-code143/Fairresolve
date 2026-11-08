@@ -343,6 +343,7 @@ describe('RBAC & Multi-Tenant Security Integration Tests', () => {
       policyVersion: '1.0',
       status: 'ACTIVE',
       createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
     };
     db.cases[caseId].activeApproval = approval;
 
