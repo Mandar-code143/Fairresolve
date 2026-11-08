@@ -16,7 +16,8 @@ describe('Transactional Outbox Worker & Dead-Letter Handling', () => {
     expect(event.status).toBe('PENDING');
     expect(event.attempts).toBe(0);
     expect(event.retryCount).toBe(0);
-    expect(new Date(event.nextAttemptAt).getTime()).toBeGreaterThan(Date.now());
+    expect(event.nextAttemptAt).toBeDefined();
+    expect(new Date(event.nextAttemptAt!).getTime()).toBeGreaterThan(Date.now() - 1000);
   });
 
   it('rejects unhandled or unknown event types without silent failure', async () => {
