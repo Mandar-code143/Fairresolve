@@ -21,42 +21,9 @@ describe('RBAC & Multi-Tenant Security Integration Tests', () => {
     app.use(express.json());
     app.use(cookieParser());
 
-    const defaultOrderId = 'ord-apex-01';
-    db.orders[defaultOrderId] = {
-      id: defaultOrderId,
-      tenantId: 'tenant-apex-101',
-      orderNumber: 'ORD-RBAC-01',
-      paypalOrderId: 'PAYPAL-RBAC-01',
-      paypalCaptureId: 'CAP-RBAC-01',
-      customerName: 'Alice Customer',
-      customerEmail: 'alice@example.com',
-      totalAmount: 100.0,
-      currency: 'USD',
-      items: [],
-      status: 'PAID',
-      createdAt: new Date().toISOString(),
-      refundableAmount: 100.0,
-      refundedAmount: 0.0,
-      shippingAmount: 0.0,
-    };
-
-    const defaultCaseId = 'case-rbac-01';
-    db.cases[defaultCaseId] = {
-      id: defaultCaseId,
-      tenantId: 'tenant-apex-101',
-      orderId: 'ord-apex-01',
-      customerName: 'Alice Customer',
-      customerEmail: 'alice@example.com',
-      reason: 'DEFECTIVE_ITEM',
-      customerStatement: 'Item damaged',
-      status: 'READY_FOR_REVIEW',
-      suggestedAction: 'REFUND_IN_FULL',
-      suggestedRefundAmount: 50.0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      customerAccessToken: 'tok-rbac-test',
-      tokenExpiresAt: new Date(Date.now() + 86400000).toISOString(),
-    } as any;
+    if (!db.cases['case-101']) {
+      db.reseed();
+    }
 
     // 1. Protected Team Management (OWNER, ADMIN only)
     app.post(
@@ -220,7 +187,7 @@ describe('RBAC & Multi-Tenant Security Integration Tests', () => {
     const analystToken = createSessionForRole('ANALYST');
     const viewerToken = createSessionForRole('VIEWER');
 
-    const sampleCaseId = 'case-rbac-01';
+    const sampleCaseId = 'case-101';
 
     // REVIEWER: 200
     const resRev = await supertest(app)
@@ -247,7 +214,7 @@ describe('RBAC & Multi-Tenant Security Integration Tests', () => {
   it('allows ANALYST to run AI investigation, but rejects VIEWER', async () => {
     const analystToken = createSessionForRole('ANALYST');
     const viewerToken = createSessionForRole('VIEWER');
-    const sampleCaseId = 'case-rbac-01';
+    const sampleCaseId = 'case-101';
 
     // ANALYST: 200
     const resAnalyst = await supertest(app)

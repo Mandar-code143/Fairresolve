@@ -1240,6 +1240,11 @@ export class Database {
   // -------------------------------------------------------------
   // SEED DATA INITIALIZER
   // -------------------------------------------------------------
+  public reseed() {
+    this.data = this.getDefaultSchema();
+    this.seedInitialData();
+  }
+
   private seedInitialData() {
     const tenantApex: Tenant = {
       id: 'tenant-apex-101',
@@ -2163,7 +2168,7 @@ export class Database {
     const matchedCaseIds: string[] = [];
     for (const c of Object.values(this.data.cases)) {
       if (excludeCaseId && c.id === excludeCaseId) continue;
-      for (const ev of c.evidence) {
+      for (const ev of (c.evidence || [])) {
         if (ev.sha256Hash === hash) {
           matchedCaseIds.push(c.id);
           break;
