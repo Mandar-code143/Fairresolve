@@ -240,8 +240,8 @@ export class PayPalGateway {
           },
         ],
         application_context: {
-          return_url: params.returnUrl || 'http://localhost:3000/demo-checkout?status=approved',
-          cancel_url: params.cancelUrl || 'http://localhost:3000/demo-checkout?status=cancelled',
+          return_url: params.returnUrl || `${config.APP_BASE_URL}/demo-checkout?status=approved`,
+          cancel_url: params.cancelUrl || `${config.APP_BASE_URL}/demo-checkout?status=cancelled`,
           user_action: 'PAY_NOW',
           shipping_preference: 'NO_SHIPPING',
         },
@@ -277,7 +277,7 @@ export class PayPalGateway {
     const simOrderId = `SIM-SANDBOX-ORD-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
     return {
       orderId: simOrderId,
-      approveUrl: `/demo-checkout?status=approved&simulated=true&token=${simOrderId}`,
+      approveUrl: `${config.APP_BASE_URL}/demo-checkout?status=approved&simulated=true&token=${simOrderId}`,
       isSimulated: true,
     };
   }

@@ -18,12 +18,29 @@ import path from 'path';
 import sharp, { Metadata } from 'sharp';
 import { EvidenceObject } from '../types';
 import { db } from './database';
+import config from './config';
 
-const UPLOADS_DIR = path.resolve(process.cwd(), 'private_uploads');
+export const getUploadsDir = (): string => {
+  if (config.FAIRRESOLVE_STORAGE_DIR) {
+    const dir = path.join(path.resolve(config.FAIRRESOLVE_STORAGE_DIR), 'private_uploads');
+    if (!fs.existsSync(dir)) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+      } catch (_) {}
+    }
+    return dir;
+  }
+  const rootUploads = path.resolve(process.cwd(), 'private_uploads');
+  if (!fs.existsSync(rootUploads)) {
+    try {
+      fs.mkdirSync(rootUploads, { recursive: true });
+    } catch (_) {}
+  }
+  return rootUploads;
+};
 
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-}
+// Ensure directory is initialized
+getUploadsDir();
 
 export interface ProcessUploadResult {
   evidence: EvidenceObject;
@@ -151,7 +168,8 @@ export class EvidenceProcessor {
     // 6. Store privately with unpredictable UUID filename
     const fileId = `ev-${crypto.randomUUID().substring(0, 12)}`;
     const storageFilename = `${fileId}.${ext}`;
-    const storagePath = path.join(UPLOADS_DIR, storageFilename);
+    const uploadsDir = getUploadsDir();
+    const storagePath = path.join(uploadsDir, storageFilename);
 
     await fs.promises.writeFile(storagePath, sanitizedBuffer);
 
@@ -187,10 +205,12 @@ export class EvidenceProcessor {
   public getFilePath(fileId: string): string | null {
     if (!fileId || typeof fileId !== 'string') return null;
     const sanitized = fileId.replace(/[^a-zA-Z0-9_-]/g, '');
-    const files = fs.readdirSync(UPLOADS_DIR);
+    const uploadsDir = getUploadsDir();
+    if (!fs.existsSync(uploadsDir)) return null;
+    const files = fs.readdirSync(uploadsDir);
     const match = files.find((f) => f.startsWith(`${sanitized}.`));
     if (!match) return null;
-    return path.join(UPLOADS_DIR, match);
+    return path.join(uploadsDir, match);
   }
 }
 

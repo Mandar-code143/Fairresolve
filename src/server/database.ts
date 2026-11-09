@@ -84,7 +84,9 @@ export interface DatabaseSchema {
   invitations: Record<string, MerchantInvitation>;
 }
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+const DATA_DIR = config.FAIRRESOLVE_STORAGE_DIR
+  ? path.resolve(config.FAIRRESOLVE_STORAGE_DIR)
+  : path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'fairresolve_db.json');
 
 export class Database {
@@ -93,10 +95,13 @@ export class Database {
   private pgPool?: pg.Pool;
   private isPostgresConnected: boolean = false;
   private processedWebhookIds: Set<string> = new Set();
+  private readyPromise: Promise<void>;
 
   constructor() {
     if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+      try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      } catch (_) {}
     }
 
     if (fs.existsSync(DB_FILE)) {
@@ -116,14 +121,23 @@ export class Database {
 
     if (process.env.NODE_ENV === 'production' && (!process.env.DATABASE_URL || process.env.DATABASE_URL.trim() === '')) {
       console.error('[Database] FATAL: Production environment requires DATABASE_URL to be configured.');
-      throw new Error('Production database connection failed: DATABASE_URL is required in production.');
+      const err = new Error('Production database connection failed: DATABASE_URL is required in production.');
+      this.readyPromise = Promise.reject(err);
+      this.readyPromise.catch(() => {});
+      throw err;
     }
 
-    this.initPostgres().catch((err) => {
+    this.readyPromise = this.initPostgres().catch((err) => {
       if (process.env.NODE_ENV === 'production') {
         console.error('[Database] Unhandled PostgreSQL connection error in production:', err);
       }
+      throw err;
     });
+    this.readyPromise.catch(() => {});
+  }
+
+  public async waitForReady(): Promise<void> {
+    await this.readyPromise;
   }
 
   public async initPostgres() {
@@ -186,6 +200,7 @@ export class Database {
   public setPostgresConnected(active: boolean, pool?: pg.Pool) {
     this.isPostgresConnected = active;
     this.pgPool = pool;
+    this.readyPromise = Promise.resolve();
   }
 
   /**
@@ -194,6 +209,7 @@ export class Database {
   public async initTestPostgres(pool: pg.Pool) {
     this.pgPool = pool;
     this.isPostgresConnected = true;
+    this.readyPromise = Promise.resolve();
 
     const client = await this.pgPool.connect();
     try {
@@ -1134,7 +1150,7 @@ export class Database {
           Math.round(a.approvedAmount * 100),
           a.currency,
           a.captureId,
-          a.caseVersion,
+          a.caseVersion || 'v1',
           a.policyVersion,
           a.notes || null,
           a.status,

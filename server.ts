@@ -42,13 +42,14 @@ import { policyEngine, toCents, toDollars } from './src/server/policyEngine';
 import { evidenceProcessor } from './src/server/evidenceProcessor';
 import { backgroundWorker } from './src/server/worker';
 import { CaseEvent, MerchantInvitation, RefundApproval, RefundAttempt, UserRole } from './src/types';
+import config from './src/server/config';
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-const DEMO_MODE = process.env.DEMO_MODE !== 'false'; // default true in dev/sandbox
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : config.PORT;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production' || config.NODE_ENV === 'production';
+const DEMO_MODE = process.env.DEMO_MODE !== 'false' && config.DEMO_MODE;
 
 // -------------------------------------------------------------
 // CORE SECURITY MIDDLEWARE
@@ -65,15 +66,7 @@ app.use(
 app.use(cookieParser());
 
 // Explicit CORS Origin Allowlist - rejects arbitrary unknown origins
-const defaultAllowedOrigins = [
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-];
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
-  : defaultAllowedOrigins;
+const allowedOrigins = config.ALLOWED_ORIGINS;
 
 app.use(
   cors({
@@ -129,9 +122,21 @@ app.get('/health/live', (_req, res) => {
 
 app.get('/health/ready', (_req, res) => {
   const auditVerification = db.verifyAuditChainIntegrity();
+  const isPostgresRequired = config.NODE_ENV === 'production';
+  const isPostgresReady = db.isPostgresActive();
+
+  if (isPostgresRequired && !isPostgresReady) {
+    return res.status(503).json({
+      status: 'not_ready',
+      error: 'PostgreSQL connection is required and not currently active in production',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   res.json({
     status: 'ready',
     timestamp: new Date().toISOString(),
+    postgresActive: isPostgresReady,
     durableDatabaseLoaded: Object.keys(db.cases).length > 0,
     paypalConfigured: paypalGateway.isConfigured(),
     aiAvailable: geminiService.isAvailable(),
@@ -668,7 +673,7 @@ app.post(
   '/api/v1/cases/:id/review',
   requireAuth,
   requireRoles(['OWNER', 'ADMIN', 'REVIEWER']),
-  (req: AuthenticatedRequest, res: Response) => {
+  async (req: AuthenticatedRequest, res: Response) => {
     const { decision, reason, notes, requestedAmount } = req.body;
     const c = db.cases[req.params.id];
     if (!c || c.tenantId !== req.tenantId) {
@@ -688,6 +693,10 @@ app.post(
           reason,
         });
         if (notes) result.case.merchantNotes = notes;
+        if (db.isPostgresActive() && result.approval) {
+          await db.saveRefundApprovalPg(result.approval);
+          await db.saveCasePg(result.case);
+        }
         return res.json({ success: true, case: result.case, approval: result.approval });
       } catch (err: any) {
         return res.status(err.statusCode || 400).json({ error: err.message || 'Failed to approve case' });
@@ -745,6 +754,10 @@ app.post(
         notes,
         reason,
       });
+      if (db.isPostgresActive() && result.approval) {
+        await db.saveRefundApprovalPg(result.approval);
+        await db.saveCasePg(result.case);
+      }
       res.json({ success: true, case: result.case, approval: result.approval });
     } catch (err: any) {
       res.status(err.statusCode || 400).json({ error: err.message || 'Failed to approve refund' });
@@ -1048,7 +1061,7 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
       c.timeline.push(reconEvent);
       db.appendAuditEvent(reconEvent);
 
-      backgroundWorker.enqueue({
+      await backgroundWorker.enqueue({
         eventType: 'RECONCILE_PENDING_REFUND',
         tenantId: c.tenantId,
         payload: {
@@ -1414,6 +1427,16 @@ app.post('/api/v1/paypal/orders/:id/capture', requireAuth, async (req: Authentic
     db.cases[newCase.id] = newCase;
     db.scheduleSave();
 
+    if (db.isPostgresActive()) {
+      try {
+        await db.saveOrderPg(newOrder);
+        await db.saveCasePg(newCase);
+      } catch (dbErr: any) {
+        console.error('[Checkout] Failed to persist order/case to PostgreSQL:', dbErr.message);
+        return res.status(500).json({ error: `Database persistence failed: ${dbErr.message}` });
+      }
+    }
+
     res.json({
       success: true,
       order: newOrder,
@@ -1668,7 +1691,14 @@ app.post('/api/v1/webhooks/paypal', async (req, res) => {
   const transmissionId = req.headers['paypal-transmission-id'] as string;
   const transmissionSig = req.headers['paypal-transmission-sig'] as string;
   const transmissionTime = req.headers['paypal-transmission-time'] as string;
-  const webhookId = process.env.PAYPAL_WEBHOOK_ID || 'WH-SANDBOX-DEFAULT';
+  const webhookId = config.PAYPAL_WEBHOOK_ID || process.env.PAYPAL_WEBHOOK_ID;
+
+  if (!webhookId || webhookId === 'WH-SANDBOX-DEFAULT' || webhookId === 'UNCONFIGURED') {
+    return res.status(503).json({
+      error: 'PayPal Webhook integration is unconfigured. Provide a registered Sandbox webhook ID via PAYPAL_WEBHOOK_ID.',
+      configured: false,
+    });
+  }
 
   const isValid = await paypalGateway.verifyWebhookSignature({
     authAlgo,
@@ -1688,7 +1718,7 @@ app.post('/api/v1/webhooks/paypal', async (req, res) => {
   db.markWebhookProcessed(eventId);
 
   // Enqueue webhook for durable processing
-  backgroundWorker.enqueue({
+  await backgroundWorker.enqueue({
     eventType: 'PAYPAL_WEBHOOK_EVENT',
     tenantId: 'system',
     payload: {
@@ -1729,8 +1759,16 @@ app.get('/api/v1/audit/verify', requireAuth, (_req: AuthenticatedRequest, res: R
 // -------------------------------------------------------------
 
 async function startServer() {
+  try {
+    await db.waitForReady();
+    console.log('[Server] Database initialization verified and ready.');
+  } catch (err: any) {
+    console.error('[Server] FATAL: Database initialization failed during startup:', err.message);
+    process.exit(1);
+  }
+
   // Start background worker only if not running standalone worker process
-  if (process.env.SERVICE_TYPE !== 'worker' && process.env.RUN_IN_PROCESS_WORKER !== 'false') {
+  if (process.env.SERVICE_TYPE !== 'worker' && config.RUN_IN_PROCESS_WORKER) {
     backgroundWorker.start();
   }
 

@@ -48,7 +48,7 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/src/server/database/schema.sql ./src/server/database/schema.sql
 
 # Create non-volatile data directories and set permissions for non-root node user
-RUN mkdir -p /app/data /app/private_uploads && chown -R node:node /app
+RUN mkdir -p /app/data /app/private_uploads /data && chown -R node:node /app /data
 
 USER node
 

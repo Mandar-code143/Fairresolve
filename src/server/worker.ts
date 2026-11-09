@@ -31,7 +31,7 @@ export class BackgroundWorker {
   /**
    * Enqueue a new event into the transactional outbox
    */
-  public enqueue(options: EnqueueOutboxOptions): OutboxEvent {
+  public async enqueue(options: EnqueueOutboxOptions): Promise<OutboxEvent> {
     const event: OutboxEvent = {
       id: `obx-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
       eventType: options.eventType,
@@ -45,6 +45,10 @@ export class BackgroundWorker {
         ? new Date(Date.now() + options.runAfterSeconds * 1000).toISOString()
         : new Date().toISOString(),
     };
+
+    if (db.isPostgresActive()) {
+      await db.enqueueOutboxPg(event);
+    }
 
     db.outbox.push(event);
     db.scheduleSave();
