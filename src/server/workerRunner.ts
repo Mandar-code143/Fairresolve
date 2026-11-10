@@ -11,14 +11,17 @@ import { backgroundWorker } from './worker';
 dotenv.config();
 
 async function main() {
+  console.log('[WorkerRunner] Initializing database connection and running migrations...');
+  await db.waitForReady();
   console.log('[WorkerRunner] Database schema and outbox ready. Starting background outbox worker...');
 
   backgroundWorker.start();
 
   const handleShutdown = async (signal: string) => {
     console.log(`[WorkerRunner] Received ${signal}. Shutting down worker...`);
-    backgroundWorker.stop();
-    db.saveSync();
+    await backgroundWorker.stopAndWait();
+    await db.flush();
+    await db.closePool();
     console.log('[WorkerRunner] Worker gracefully exited.');
     process.exit(0);
   };

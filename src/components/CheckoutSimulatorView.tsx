@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ShoppingBag,
   CreditCard,
@@ -11,20 +11,33 @@ import {
   Truck,
   ExternalLink,
 } from 'lucide-react';
-import { Order } from '../types';
+import { Order, PayPalVerificationStatus } from '../types';
 import { apiFetch } from '../utils/api';
 import { SourceBadge } from './Badges';
+
+interface CheckoutReturnParams {
+  status?: string | null;
+  checkoutId?: string | null;
+  message?: string | null;
+  replayed?: boolean;
+}
 
 interface CheckoutSimulatorViewProps {
   onOrderCreated: (newOrder: Order, customerLink: string) => void;
   onNavigateToCase: (caseId: string) => void;
   isSandboxConfigured: boolean;
+  verificationStatus?: PayPalVerificationStatus;
+  returnResultParams?: CheckoutReturnParams | null;
+  onClearReturnParams?: () => void;
 }
 
 export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
   onOrderCreated,
   onNavigateToCase,
   isSandboxConfigured,
+  verificationStatus,
+  returnResultParams,
+  onClearReturnParams,
 }) => {
   const [selectedProduct, setSelectedProduct] = useState<'headphones' | 'shoes' | 'tracker'>(
     'headphones'
@@ -37,6 +50,7 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
   const [pendingOrderNumber, setPendingOrderNumber] = useState<string | null>(null);
   const [pendingApproveUrl, setPendingApproveUrl] = useState<string | null>(null);
   const [isSimulatedOrder, setIsSimulatedOrder] = useState<boolean>(false);
+  const [noticeBanner, setNoticeBanner] = useState<string | null>(null);
   const [result, setResult] = useState<{
     order: any;
     case: any;
@@ -44,6 +58,55 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
     isSimulated: boolean;
   } | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!returnResultParams?.status) return;
+    const { status, checkoutId, message } = returnResultParams;
+
+    if (status === 'captured' && checkoutId) {
+      setIsProcessing(true);
+      setErrorMessage(null);
+      apiFetch(`/api/v1/paypal/checkouts/${encodeURIComponent(checkoutId)}`)
+        .then(async (res) => {
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Failed to verify captured PayPal checkout');
+          return data;
+        })
+        .then((data) => {
+          if (data.order && data.case) {
+            setResult({
+              order: data.order,
+              case: data.case,
+              customerAccessLink: data.customerAccessLink || `/portal/${data.case.customerAccessToken}`,
+              isSimulated: Boolean(data.checkout?.isSimulated),
+            });
+            setCheckoutStep('SUCCESS');
+            onOrderCreated(data.order, data.customerAccessLink);
+          } else {
+            setErrorMessage('Checkout was captured, but associated order/case record could not be loaded.');
+          }
+        })
+        .catch((err) => {
+          setErrorMessage(err.message || 'Unable to verify returned PayPal checkout.');
+        })
+        .finally(() => {
+          setIsProcessing(false);
+          onClearReturnParams?.();
+        });
+    } else if (status === 'cancelled') {
+      setNoticeBanner('Buyer cancelled PayPal Sandbox authorization. No order or dispute case was created.');
+      setCheckoutStep('SELECT');
+      onClearReturnParams?.();
+    } else if (status === 'expired') {
+      setErrorMessage('The pending PayPal checkout session expired before capture. Start a new order.');
+      setCheckoutStep('SELECT');
+      onClearReturnParams?.();
+    } else if (status === 'error') {
+      setErrorMessage(message || 'PayPal checkout capture failed.');
+      setCheckoutStep('SELECT');
+      onClearReturnParams?.();
+    }
+  }, [returnResultParams, onOrderCreated, onClearReturnParams]);
 
   const products = {
     headphones: {
@@ -76,11 +139,16 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
   const handleInitiateOrder = async () => {
     setIsProcessing(true);
     setErrorMessage(null);
+    setNoticeBanner(null);
 
     try {
       const res = await apiFetch('/api/v1/paypal/orders', {
         method: 'POST',
-        body: JSON.stringify({ productType: selectedProduct }),
+        body: JSON.stringify({
+          productType: selectedProduct,
+          buyerName,
+          buyerEmail,
+        }),
       });
 
       const data = await res.json();
@@ -98,9 +166,9 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
     }
   };
 
-  // Step 2: Buyer Authorizes & Captures Order
+  // Step 2: Capture Order
   const handleCaptureApprovedOrder = async () => {
-    if (!pendingOrderId) return;
+    if (!pendingOrderId || isProcessing) return;
     setIsProcessing(true);
     setErrorMessage(null);
 
@@ -108,10 +176,8 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
       const res = await apiFetch(`/api/v1/paypal/orders/${pendingOrderId}/capture`, {
         method: 'POST',
         body: JSON.stringify({
-          productType: selectedProduct,
           buyerName,
           buyerEmail,
-          orderNumber: pendingOrderNumber,
         }),
       });
 
@@ -132,8 +198,10 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
     setResult(null);
     setPendingOrderId(null);
     setPendingOrderNumber(null);
+    setPendingApproveUrl(null);
     setCheckoutStep('SELECT');
     setErrorMessage(null);
+    setNoticeBanner(null);
   };
 
   return (
@@ -142,11 +210,19 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
       <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-sm">
         <div className="flex flex-wrap items-center gap-2 mb-1.5">
           <span className="text-xs font-mono font-semibold uppercase text-[#0070BA] bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-            PayPal v6 Checkout Workflow
+            PayPal v2 Orders Workflow
           </span>
           <span className="text-xs text-slate-400">·</span>
-          {isSandboxConfigured ? (
+          {verificationStatus === 'SANDBOX_AUTHENTICATED' || isSandboxConfigured ? (
             <SourceBadge source="PAYPAL_VERIFIED" />
+          ) : verificationStatus === 'AUTHENTICATION_FAILED' ? (
+            <span className="inline-flex items-center gap-1 text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 uppercase">
+              Sandbox Auth Failed
+            </span>
+          ) : verificationStatus === 'CREDENTIALS_PRESENT_UNVERIFIED' ? (
+            <span className="inline-flex items-center gap-1 text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 uppercase">
+              Sandbox Credentials Unverified
+            </span>
           ) : (
             <SourceBadge source="SIMULATION_MODE" />
           )}
@@ -156,10 +232,17 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
         </h1>
         <p className="text-xs text-slate-600 mt-1 max-w-2xl leading-relaxed">
           Demonstrates authentic PayPal Orders v2 integration: <strong>Order Creation</strong> →{' '}
-          <strong>Buyer Authorization</strong> → <strong>Server Capture</strong>. Produces a verified
-          dispute investigation record with authentic carrier tracking provenance and customer dispute link.
+          <strong>Buyer Authorization</strong> → <strong>Server Capture</strong>. Carrier tracking numbers
+          in demo checkout orders are labeled synthetic fixtures unless connected to a carrier API.
         </p>
       </div>
+
+      {noticeBanner && (
+        <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-3 text-amber-900 text-xs">
+          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <div>{noticeBanner}</div>
+        </div>
+      )}
 
       {errorMessage && (
         <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-3 text-rose-800 text-xs">
@@ -179,10 +262,13 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
             </div>
             <div>
               <h2 className="text-lg font-bold text-slate-900">
-                PayPal Sandbox Payment Captured Successfully
+                {result.isSimulated
+                  ? 'Simulated Sandbox Payment Recorded'
+                  : 'PayPal Sandbox Payment Captured Successfully'}
               </h2>
               <p className="text-xs text-slate-500 font-mono">
                 Capture ID: <span className="font-bold text-slate-800">{result.order.paypalCaptureId}</span> · Order: {result.order.orderNumber}
+                {result.isSimulated ? ' · Simulated Mode' : ''}
               </p>
             </div>
           </div>
@@ -289,14 +375,12 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
                   <CreditCard className="w-4 h-4 text-[#0070BA]" />
                   <span>PayPal Buyer Approval Flow</span>
                 </span>
-                {pendingApproveUrl.startsWith('http') ? (
+                {!isSimulatedOrder && pendingApproveUrl.startsWith('http') ? (
                   <a
                     href={pendingApproveUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
                     className="inline-flex items-center gap-1 text-[#0070BA] hover:underline font-bold"
                   >
-                    <span>Authorize on PayPal Sandbox</span>
+                    <span>Continue to PayPal Sandbox Checkout</span>
                     <ExternalLink className="w-3.5 h-3.5" />
                   </a>
                 ) : (
@@ -312,20 +396,34 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
           )}
 
           <div className="space-y-3">
+            {!isSimulatedOrder && pendingApproveUrl?.startsWith('http') && (
+              <a
+                href={pendingApproveUrl}
+                className="w-full py-3.5 bg-[#0070BA] hover:bg-[#003087] text-white font-bold rounded-lg transition-colors flex items-center justify-center gap-2 shadow-sm text-sm"
+              >
+                <ExternalLink className="w-4 h-4" />
+                <span>Authorize Payment on PayPal Sandbox (${grossTotal.toFixed(2)})</span>
+              </a>
+            )}
             <button
               onClick={handleCaptureApprovedOrder}
-              disabled={isProcessing}
-              className="w-full py-3.5 bg-[#FFC439] hover:bg-[#F4B41A] text-slate-900 font-bold rounded-lg transition-colors flex items-center justify-center gap-2 shadow-sm"
+              disabled={isProcessing || !pendingOrderId}
+              className="w-full py-3 bg-[#FFC439] hover:bg-[#F4B41A] text-slate-900 font-bold rounded-lg transition-colors flex items-center justify-center gap-2 shadow-sm text-sm"
             >
               {isProcessing ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span>Capturing Authorized Payment via PayPal API...</span>
                 </>
+              ) : isSimulatedOrder ? (
+                <>
+                  <CreditCard className="w-4 h-4" />
+                  <span>Complete Simulated Sandbox Capture (${grossTotal.toFixed(2)})</span>
+                </>
               ) : (
                 <>
                   <CreditCard className="w-4 h-4" />
-                  <span>Approve & Authorize Payment (${grossTotal.toFixed(2)})</span>
+                  <span>Capture Approved Order via Server API (${grossTotal.toFixed(2)})</span>
                 </>
               )}
             </button>
@@ -348,36 +446,7 @@ export const CheckoutSimulatorView: React.FC<CheckoutSimulatorViewProps> = ({
               1. Select Test Merchandise
             </h2>
 
-            {pendingApproveUrl && (
-            <div className="p-3.5 bg-blue-50/70 border border-blue-200 rounded-lg text-xs space-y-2">
-              <div className="flex items-center justify-between font-semibold text-slate-900">
-                <span className="flex items-center gap-1.5">
-                  <CreditCard className="w-4 h-4 text-[#0070BA]" />
-                  <span>PayPal Buyer Approval Flow</span>
-                </span>
-                {pendingApproveUrl.startsWith('http') ? (
-                  <a
-                    href={pendingApproveUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-[#0070BA] hover:underline font-bold"
-                  >
-                    <span>Authorize on PayPal Sandbox</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                ) : (
-                  <span className="text-amber-800 font-mono text-[11px] bg-amber-100 px-2 py-0.5 rounded">
-                    Simulated Approval Mode
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-slate-500 font-mono truncate">
-                Redirect URL: {pendingApproveUrl}
-              </p>
-            </div>
-          )}
-
-          <div className="space-y-3">
+            <div className="space-y-3">
               {(Object.keys(products) as Array<keyof typeof products>).map((key) => {
                 const p = products[key];
                 const isSelected = selectedProduct === key;

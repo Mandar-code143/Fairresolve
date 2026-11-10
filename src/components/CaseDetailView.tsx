@@ -445,10 +445,15 @@ export const CaseDetailView: React.FC<CaseDetailViewProps> = ({
                   </span>
                 </div>
                 {order.shippingCarrier && (
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <span className="text-slate-500">Carrier Tracking:</span>
-                    <span className="font-mono text-slate-700">
+                    <span className="font-mono text-slate-700 text-right">
                       {order.shippingCarrier} · {order.trackingNumber}
+                      {order.trackingSynthetic && (
+                        <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">
+                          Synthetic Demo Fixture
+                        </span>
+                      )}
                     </span>
                   </div>
                 )}

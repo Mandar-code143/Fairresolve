@@ -2,9 +2,9 @@ name: CI Pipeline - FairResolve
 
 on:
   push:
-    branches: [ "main", "antigravity/**", "hardening/**" ]
+    branches: [ "main", "railway-deploy-hardening", "antigravity/**", "hardening/**" ]
   pull_request:
-    branches: [ "main", "hardening/**" ]
+    branches: [ "main", "railway-deploy-hardening", "hardening/**" ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   test-and-build:
-    name: Lint, Test & Build
+    name: Lint, Test & Build (PostgreSQL 16)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -49,12 +49,14 @@ jobs:
       - name: TypeScript Static Typecheck
         run: pnpm run lint
 
-      - name: Automated Security & Regression Tests
-        run: pnpm test
+      - name: Run Full Unit, Smoke & Real PostgreSQL 16 Test Suite
+        run: pnpm exec vitest run --no-file-parallelism
         env:
+          CI: "true"
+          NODE_ENV: test
           DATABASE_URL: postgres://fairresolve:fairresolve_secret@localhost:5432/fairresolve
 
-      - name: Production Build (Frontend & Backend)
+      - name: Production Build (Frontend & Backend & Worker)
         run: pnpm run build
 
       - name: Verify Compiled Server Artifact
@@ -63,19 +65,88 @@ jobs:
       - name: Verify Compiled Worker Artifact
         run: node -c dist/worker.js
 
-  docker-lint:
-    name: Docker Configuration Lint
+  docker-smoke:
+    name: Docker Build, Compose Lint & Container Startup Smoke Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Validate docker-compose Configuration
+        run: docker compose config > /dev/null
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Validate Dockerfile Build
+      - name: Build Production Docker Image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
-          tags: fairresolve:ci-test
+          load: true
+          tags: fairresolve:ci-smoke
+
+      - name: Container Runtime Smoke Test (Postgres 16 + Volume Permissions + /health/ready)
+        run: |
+          set -euo pipefail
+          docker network create fairresolve-ci-net
+          docker run -d --name fairresolve-ci-pg --network fairresolve-ci-net \
+            -e POSTGRES_USER=fairresolve \
+            -e POSTGRES_PASSWORD=fairresolve_secret \
+            -e POSTGRES_DB=fairresolve \
+            postgres:16-alpine
+
+          for i in $(seq 1 30); do
+            if docker exec fairresolve-ci-pg pg_isready -U fairresolve -d fairresolve >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          HOST_VOL="$(mktemp -d)"
+          # Simulate Railway root-owned fresh volume mount (0755 owned by root)
+          sudo chown root:root "${HOST_VOL}"
+          sudo chmod 755 "${HOST_VOL}"
+
+          docker run -d --name fairresolve-ci-app --network fairresolve-ci-net \
+            -p 3000:3000 \
+            -v "${HOST_VOL}:/app/data" \
+            -e NODE_ENV=production \
+            -e PORT=3000 \
+            -e DEMO_MODE=false \
+            -e SERVICE_TYPE=app \
+            -e RUN_IN_PROCESS_WORKER=true \
+            -e FAIRRESOLVE_STORAGE_DIR=/app/data \
+            -e SESSION_SECRET=ci-smoke-secret-64-chars-long-enough-for-hmac-checks \
+            -e APP_BASE_URL=http://localhost:3000 \
+            -e ALLOWED_ORIGINS=http://localhost:3000 \
+            -e DATABASE_URL=postgres://fairresolve:fairresolve_secret@fairresolve-ci-pg:5432/fairresolve \
+            fairresolve:ci-smoke
+
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/health/ready >/tmp/ready.json 2>/dev/null; then
+              cat /tmp/ready.json
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "${READY}" -ne 1 ]; then
+            docker logs fairresolve-ci-app || true
+            exit 1
+          fi
+
+          # Verify app process runs as non-root node user and volume is writable
+          APP_USER="$(docker exec fairresolve-ci-app ps -o user= -C node | head -n 1 | xargs)"
+          echo "Running node process user: ${APP_USER}"
+          test "${APP_USER}" = "node"
+
+          curl -fsS http://127.0.0.1:3000/health/live | grep -q '"status":"ok"'
+          curl -fsS http://127.0.0.1:3000/api/v1/does-not-exist -o /tmp/api404.json -w "%{http_code}\n" | grep -q "404"
+          grep -q "API route not found" /tmp/api404.json
+
+          docker rm -f fairresolve-ci-app fairresolve-ci-pg
+          docker network rm fairresolve-ci-net
+          sudo rm -rf "${HOST_VOL}"

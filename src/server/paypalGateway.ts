@@ -20,15 +20,19 @@
 import { config } from './config';
 import { PayPalVerificationStatus } from '../types';
 
+export interface CreateOrderItemParam {
+  name: string;
+  sku?: string;
+  unitPrice: number;
+  quantity: number;
+}
+
 export interface CreateOrderParams {
   amount: number;
   currency: string;
   orderNumber: string;
-  items: Array<{
-    name: string;
-    unitPrice: number;
-    quantity: number;
-  }>;
+  shippingAmount?: number;
+  items: CreateOrderItemParam[];
   returnUrl?: string;
   cancelUrl?: string;
 }
@@ -38,6 +42,7 @@ export interface CreateOrderResult {
   approveUrl?: string;
   isSimulated: boolean;
   rawResponse?: any;
+  payloadPreview?: any;
 }
 
 export interface CaptureOrderResult {
@@ -209,43 +214,114 @@ export class PayPalGateway {
   }
 
   /**
+   * Build and strictly validate PayPal Orders v2 payload using exact integer minor units (cents).
+   */
+  public buildCreateOrderPayload(params: CreateOrderParams): {
+    payload: any;
+    itemTotalCents: number;
+    shippingCents: number;
+    grossCents: number;
+    currency: string;
+  } {
+    const currency = (params.currency || '').trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(currency)) {
+      throw new Error(`Invalid PayPal order currency: '${params.currency}'. Expected 3-letter ISO code.`);
+    }
+
+    if (!params.orderNumber || typeof params.orderNumber !== 'string' || !params.orderNumber.trim()) {
+      throw new Error('PayPal createOrder requires a valid orderNumber.');
+    }
+
+    if (!Array.isArray(params.items) || params.items.length === 0) {
+      throw new Error('PayPal createOrder requires at least one line item.');
+    }
+
+    let itemTotalCents = 0;
+    const formattedItems = params.items.map((i) => {
+      if (!Number.isInteger(i.quantity) || i.quantity <= 0) {
+        throw new Error(`Invalid quantity for item '${i.name}': ${i.quantity}`);
+      }
+      if (!Number.isFinite(i.unitPrice) || i.unitPrice < 0) {
+        throw new Error(`Invalid unitPrice for item '${i.name}': ${i.unitPrice}`);
+      }
+      const unitCents = Math.round(i.unitPrice * 100);
+      itemTotalCents += unitCents * i.quantity;
+
+      return {
+        name: i.name,
+        ...(i.sku ? { sku: i.sku } : {}),
+        unit_amount: {
+          currency_code: currency,
+          value: (unitCents / 100).toFixed(2),
+        },
+        quantity: i.quantity.toString(),
+      };
+    });
+
+    const shippingInput = params.shippingAmount ?? 0;
+    if (!Number.isFinite(shippingInput) || shippingInput < 0) {
+      throw new Error(`Invalid shippingAmount: ${shippingInput}`);
+    }
+    const shippingCents = Math.round(shippingInput * 100);
+
+    if (!Number.isFinite(params.amount) || params.amount <= 0) {
+      throw new Error(`Invalid gross order amount: ${params.amount}`);
+    }
+    const suppliedGrossCents = Math.round(params.amount * 100);
+    const grossCents = itemTotalCents + shippingCents;
+
+    if (suppliedGrossCents !== grossCents) {
+      throw new Error(
+        `Order amount breakdown mismatch: gross=${(suppliedGrossCents / 100).toFixed(2)} !== item_total=${(itemTotalCents / 100).toFixed(2)} + shipping=${(shippingCents / 100).toFixed(2)}`
+      );
+    }
+
+    const breakdown: Record<string, { currency_code: string; value: string }> = {
+      item_total: {
+        currency_code: currency,
+        value: (itemTotalCents / 100).toFixed(2),
+      },
+    };
+
+    if (shippingCents > 0) {
+      breakdown.shipping = {
+        currency_code: currency,
+        value: (shippingCents / 100).toFixed(2),
+      };
+    }
+
+    const payload = {
+      intent: 'CAPTURE',
+      purchase_units: [
+        {
+          reference_id: params.orderNumber,
+          amount: {
+            currency_code: currency,
+            value: (grossCents / 100).toFixed(2),
+            breakdown,
+          },
+          items: formattedItems,
+        },
+      ],
+      application_context: {
+        return_url: params.returnUrl || `${config.APP_BASE_URL}/api/v1/paypal/checkout/return`,
+        cancel_url: params.cancelUrl || `${config.APP_BASE_URL}/api/v1/paypal/checkout/cancel`,
+        user_action: 'PAY_NOW',
+        shipping_preference: 'NO_SHIPPING',
+      },
+    };
+
+    return { payload, itemTotalCents, shippingCents, grossCents, currency };
+  }
+
+  /**
    * Create PayPal Sandbox Order (POST /v2/checkout/orders) with genuine buyer approval link
    */
   public async createOrder(params: CreateOrderParams): Promise<CreateOrderResult> {
+    const { payload } = this.buildCreateOrderPayload(params);
+
     if (this.isConfigured()) {
       const token = await this.getAccessToken();
-      const payload: any = {
-        intent: 'CAPTURE',
-        purchase_units: [
-          {
-            reference_id: params.orderNumber,
-            amount: {
-              currency_code: params.currency,
-              value: params.amount.toFixed(2),
-              breakdown: {
-                item_total: {
-                  currency_code: params.currency,
-                  value: params.amount.toFixed(2),
-                },
-              },
-            },
-            items: params.items.map((i) => ({
-              name: i.name,
-              unit_amount: {
-                currency_code: params.currency,
-                value: i.unitPrice.toFixed(2),
-              },
-              quantity: i.quantity.toString(),
-            })),
-          },
-        ],
-        application_context: {
-          return_url: params.returnUrl || `${config.APP_BASE_URL}/demo-checkout?status=approved`,
-          cancel_url: params.cancelUrl || `${config.APP_BASE_URL}/demo-checkout?status=cancelled`,
-          user_action: 'PAY_NOW',
-          shipping_preference: 'NO_SHIPPING',
-        },
-      };
 
       const res = await fetch(`${this.baseUrl}/v2/checkout/orders`, {
         method: 'POST',
@@ -263,6 +339,10 @@ export class PayPalGateway {
         );
       }
 
+      if (!data.id || typeof data.id !== 'string') {
+        throw new Error('PayPal Create Order API failed: Response missing order ID.');
+      }
+
       const approveUrl = data.links?.find((l: any) => l.rel === 'approve')?.href;
 
       return {
@@ -270,22 +350,34 @@ export class PayPalGateway {
         approveUrl,
         isSimulated: false,
         rawResponse: data,
+        payloadPreview: payload,
       };
     }
 
     // Explicitly labeled simulation fallback when unconfigured
     const simOrderId = `SIM-SANDBOX-ORD-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
+    const simReturnUrl = params.returnUrl
+      ? `${params.returnUrl}${params.returnUrl.includes('?') ? '&' : '?'}token=${simOrderId}&simulated=true`
+      : `${config.APP_BASE_URL}/?tab=checkout&status=approved&simulated=true&token=${simOrderId}`;
     return {
       orderId: simOrderId,
-      approveUrl: `${config.APP_BASE_URL}/demo-checkout?status=approved&simulated=true&token=${simOrderId}`,
+      approveUrl: simReturnUrl,
       isSimulated: true,
+      payloadPreview: payload,
     };
   }
 
   /**
    * Capture PayPal Sandbox Order (POST /v2/checkout/orders/{id}/capture)
    */
-  public async captureOrder(orderId: string): Promise<CaptureOrderResult> {
+  public async captureOrder(
+    orderId: string,
+    expected?: { amount: number; currency: string }
+  ): Promise<CaptureOrderResult> {
+    if (!orderId || typeof orderId !== 'string' || !orderId.trim()) {
+      throw new Error('PayPal Capture Order failed: Missing orderId.');
+    }
+
     if (this.isConfigured() && !orderId.startsWith('SIM-SANDBOX-')) {
       const token = await this.getAccessToken();
       const res = await fetch(`${this.baseUrl}/v2/checkout/orders/${orderId}/capture`, {
@@ -303,40 +395,68 @@ export class PayPalGateway {
         );
       }
 
+      if (data.id && data.id !== orderId) {
+        throw new Error(
+          `PayPal Capture Order mismatch: requested ${orderId}, provider returned ${data.id}.`
+        );
+      }
+
       const capture = data.purchase_units?.[0]?.payments?.captures?.[0];
-      if (!capture || !capture.id) {
+      if (!capture || typeof capture.id !== 'string' || !capture.id.trim()) {
         throw new Error('PayPal Capture Order failed: Provider response contains no valid capture ID.');
       }
 
-      if (!capture.status && !data.status) {
+      const rawStatus = (capture.status || data.status || '').toString().toUpperCase();
+      if (!rawStatus) {
         throw new Error('PayPal Capture Order failed: Provider response contains no capture status.');
       }
 
-      const captureStatus = (capture.status || data.status) as CaptureOrderResult['status'];
-      const grossAmount = parseFloat(capture.amount?.value || '0');
-      const currency = capture.amount?.currency_code || 'USD';
+      const statusMap: Record<string, CaptureOrderResult['status']> = {
+        COMPLETED: 'COMPLETED',
+        PENDING: 'PENDING',
+        VOIDED: 'VOIDED',
+        DECLINED: 'FAILED',
+        FAILED: 'FAILED',
+      };
+      const captureStatus: CaptureOrderResult['status'] = statusMap[rawStatus] || 'FAILED';
+
+      const parsedAmount = capture.amount?.value !== undefined ? parseFloat(String(capture.amount.value)) : NaN;
+      const currency = (capture.amount?.currency_code || '').toString().toUpperCase();
       const payerEmail = data.payer?.email_address;
 
+      if (captureStatus === 'COMPLETED') {
+        if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+          throw new Error(`PayPal Capture Order returned invalid gross amount: ${capture.amount?.value}`);
+        }
+        if (!/^[A-Z]{3}$/.test(currency)) {
+          throw new Error(`PayPal Capture Order returned invalid currency: ${capture.amount?.currency_code}`);
+        }
+      }
+
       return {
-        orderId,
+        orderId: data.id || orderId,
         captureId: capture.id,
         status: captureStatus,
-        grossAmount,
-        currency,
+        grossAmount: Number.isFinite(parsedAmount) ? parsedAmount : 0,
+        currency: currency || expected?.currency || 'USD',
         payerEmail,
         isSimulated: false,
         rawResponse: data,
       };
     }
 
-    // Explicitly labeled simulation mode when unconfigured or testing
+    // Explicitly labeled simulation mode when unconfigured or simulated order ID
+    if (!expected || !Number.isFinite(expected.amount) || expected.amount <= 0) {
+      throw new Error('Simulated capture requires valid server-stored expected order amount and currency.');
+    }
+
     const simCaptureId = `SIM-SANDBOX-CAP-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
     return {
       orderId,
       captureId: simCaptureId,
       status: 'COMPLETED',
-      grossAmount: 149.99,
-      currency: 'USD',
+      grossAmount: parseFloat(expected.amount.toFixed(2)),
+      currency: (expected.currency || 'USD').toUpperCase(),
       payerEmail: 'buyer.sandbox@example.com',
       isSimulated: true,
       rawResponse: {
@@ -484,7 +604,10 @@ export class PayPalGateway {
   /**
    * Fetch Refund Details from PayPal Payments API (GET /v2/payments/refunds/{refund_id})
    */
-  public async getRefund(refundId: string): Promise<{
+  public async getRefund(
+    refundId: string,
+    expected?: { amount: number; currency: string }
+  ): Promise<{
     id: string;
     status: 'COMPLETED' | 'PENDING' | 'FAILED' | 'CANCELLED' | 'UNKNOWN';
     amount?: { value: string; currency_code: string };
@@ -522,16 +645,20 @@ export class PayPalGateway {
         rawResponse: data,
       };
     }
+
+    const simAmount = expected?.amount !== undefined && Number.isFinite(expected.amount) ? expected.amount : 100.0;
+    const simCurrency = (expected?.currency || 'USD').toUpperCase();
     return {
       id: refundId,
       status: 'COMPLETED',
-      amount: { value: '100.00', currency_code: 'USD' },
+      amount: { value: simAmount.toFixed(2), currency_code: simCurrency },
       isSimulated: true,
     };
   }
 
   /**
-   * Cryptographically verify PayPal Webhook signature via PayPal API
+   * Cryptographically verify PayPal Webhook signature via PayPal API.
+   * Fails closed whenever credentials, webhook ID, headers, payload, or cert_url are missing/invalid.
    */
   public async verifyWebhookSignature(params: {
     authAlgo: string;
@@ -548,23 +675,43 @@ export class PayPalGateway {
       !params.transmissionId ||
       !params.transmissionSig ||
       !params.transmissionTime ||
+      !params.webhookId ||
+      params.webhookId === 'WH-SANDBOX-DEFAULT' ||
+      params.webhookId === 'UNCONFIGURED' ||
       params.transmissionSig === 'INVALID_SIGNATURE'
     ) {
       return false;
     }
 
-    // SSRF protection: cert_url MUST belong to paypal.com domain and use https
+    if (
+      !params.webhookEvent ||
+      typeof params.webhookEvent !== 'object' ||
+      typeof params.webhookEvent.id !== 'string' ||
+      !params.webhookEvent.id.trim() ||
+      typeof params.webhookEvent.event_type !== 'string' ||
+      !params.webhookEvent.event_type.trim()
+    ) {
+      return false;
+    }
+
+    // SSRF protection: cert_url MUST belong to paypal.com domain, use https, and have no embedded userinfo
     try {
       const certUrlObj = new URL(params.certUrl);
-      if (!certUrlObj.hostname.endsWith('.paypal.com') || certUrlObj.protocol !== 'https:') {
+      if (
+        certUrlObj.protocol !== 'https:' ||
+        certUrlObj.username ||
+        certUrlObj.password ||
+        !certUrlObj.hostname.endsWith('.paypal.com')
+      ) {
         return false;
       }
     } catch {
       return false;
     }
 
-    if (!this.isConfigured() || params.transmissionSig === 'valid-transmission-signature-hash') {
-      return true;
+    // Fail closed when PayPal credentials are not configured — NO magic bypasses allowed
+    if (!this.isConfigured()) {
+      return false;
     }
 
     try {

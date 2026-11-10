@@ -26,7 +26,12 @@ export class BackgroundWorker {
   private isRunning: boolean = false;
   private pollIntervalMs: number = 3000;
   private timer?: NodeJS.Timeout;
+  private inFlightPoll: Promise<number> | null = null;
   private workerId: string = `worker-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+
+  public isActive(): boolean {
+    return this.isRunning;
+  }
 
   /**
    * Enqueue a new event into the transactional outbox
@@ -56,7 +61,7 @@ export class BackgroundWorker {
   }
 
   /**
-   * Start the background worker polling loop
+   * Start the background worker polling loop (idempotent — prevents duplicate loops)
    */
   public start() {
     if (this.isRunning) return;
@@ -72,18 +77,28 @@ export class BackgroundWorker {
     this.isRunning = false;
     if (this.timer) {
       clearTimeout(this.timer);
+      this.timer = undefined;
     }
     console.log(`[Worker] FairResolve Background Worker stopped`);
+  }
+
+  public async stopAndWait(): Promise<void> {
+    this.stop();
+    if (this.inFlightPoll) {
+      await this.inFlightPoll.catch(() => {});
+    }
   }
 
   private scheduleNextPoll(delayMs: number = this.pollIntervalMs) {
     if (!this.isRunning) return;
     this.timer = setTimeout(async () => {
       try {
-        await this.pollAndProcess();
+        this.inFlightPoll = this.pollAndProcess();
+        await this.inFlightPoll;
       } catch (err) {
         console.error('[Worker] Unexpected error during outbox cycle:', err);
       } finally {
+        this.inFlightPoll = null;
         this.scheduleNextPoll();
       }
     }, delayMs);
@@ -315,6 +330,12 @@ export class BackgroundWorker {
         };
         c.timeline.push(timelineEvent);
         db.appendAuditEvent(timelineEvent);
+        if (db.isPostgresActive()) {
+          await db.saveAiRunPg(c.id, aiResult);
+          await db.savePolicyEvaluationPg(c.id, policyResult);
+          await db.saveCasePg(c);
+        }
+        db.scheduleSave();
         break;
       }
 
@@ -330,23 +351,94 @@ export class BackgroundWorker {
 
       case 'INVITATION_EXPIRY_SWEEP': {
         const now = new Date();
+        let expiredCount = 0;
         for (const inv of Object.values(db.invitations)) {
           if (inv.status === 'PENDING' && new Date(inv.expiresAt) < now) {
             inv.status = 'EXPIRED';
+            expiredCount++;
+            if (db.isPostgresActive()) {
+              await db.saveInvitationPg(inv);
+            }
+          }
+        }
+        if (expiredCount > 0) {
+          db.scheduleSave();
+        }
+        break;
+      }
+
+      case 'PAYPAL_WEBHOOK_EVENT': {
+        const { webhookEventId, webhookEventType, resource } = event.payload || {};
+        if (webhookEventType === 'PAYMENT.CAPTURE.REFUNDED' && resource?.id) {
+          const paypalRefundId = String(resource.id);
+          const matchingAttempt = Object.values(db.refundAttempts).find(
+            (a) => a.paypalRefundId === paypalRefundId
+          ) || Object.values(db.cases)
+            .flatMap((cs) => cs.refundAttempts)
+            .find((a) => a.paypalRefundId === paypalRefundId);
+
+          if (matchingAttempt && matchingAttempt.status !== 'SUCCEEDED' && resource.status === 'COMPLETED') {
+            const expectedCents = matchingAttempt.amountCents ?? toCents(matchingAttempt.amount);
+            const webhookCents = resource.amount?.value !== undefined
+              ? toCents(parseFloat(resource.amount.value))
+              : expectedCents;
+            const webhookCurrency = resource.amount?.currency_code
+              ? String(resource.amount.currency_code).toUpperCase()
+              : matchingAttempt.currency.toUpperCase();
+
+            if (webhookCents === expectedCents && webhookCurrency === matchingAttempt.currency.toUpperCase()) {
+              await db.finalizeRefundTransaction({
+                attemptId: matchingAttempt.id,
+                outcome: 'SUCCEEDED',
+                paypalRefundId,
+                paypalResponse: resource,
+                isSimulated: paypalRefundId.startsWith('SIM-'),
+                actor: { type: 'PAYPAL_GATEWAY', name: 'PayPal Webhook Reconciler' },
+                summary: `Webhook ${webhookEventId || ''} confirmed refund ${paypalRefundId} COMPLETED.`,
+                eventType: 'REFUND_RECONCILED',
+                eventDetails: {
+                  refundAttemptId: matchingAttempt.id,
+                  paypalRefundId,
+                  webhookEventId,
+                  webhookEventType,
+                  status: 'SUCCEEDED',
+                },
+              });
+            } else {
+              await db.finalizeRefundTransaction({
+                attemptId: matchingAttempt.id,
+                outcome: 'RECONCILIATION_REQUIRED',
+                paypalRefundId,
+                paypalResponse: resource,
+                errorMessage: `Webhook amount/currency mismatch for refund ${paypalRefundId}.`,
+                caseStatusOnNonSuccess: 'REFUND_UNKNOWN',
+                actor: { type: 'PAYPAL_GATEWAY', name: 'PayPal Webhook Reconciler' },
+                summary: `Webhook ${webhookEventId || ''} flagged amount/currency mismatch for refund ${paypalRefundId}.`,
+                eventType: 'REFUND_RECONCILIATION_REQUIRED',
+                eventDetails: {
+                  refundAttemptId: matchingAttempt.id,
+                  paypalRefundId,
+                  webhookEventId,
+                  webhookEventType,
+                },
+              });
+            }
           }
         }
         break;
       }
 
       case 'RECONCILE_PENDING_REFUND': {
-        const { caseId, refundAttemptId, captureId, idempotencyKey } = event.payload;
+        const { caseId, refundAttemptId, idempotencyKey } = event.payload;
         const c = db.cases[caseId];
         if (!c) throw new Error(`Case ${caseId} not found for refund reconciliation`);
 
         const order = db.orders[c.orderId];
         if (!order) throw new Error(`Order ${c.orderId} not found for refund reconciliation`);
 
-        const attempt = c.refundAttempts.find((a) => a.id === refundAttemptId || a.idempotencyKey === idempotencyKey);
+        const attempt =
+          db.refundAttempts[refundAttemptId] ||
+          c.refundAttempts.find((a) => a.id === refundAttemptId || a.idempotencyKey === idempotencyKey);
         if (!attempt) throw new Error(`Refund attempt ${refundAttemptId} not found for reconciliation`);
 
         // If already resolved, nothing to reconcile
@@ -358,129 +450,164 @@ export class BackgroundWorker {
           if (!attempt.paypalRefundId) {
             // CRITICAL FINTECH GUARD: A completed capture does NOT prove that a refund occurred.
             // Never infer refund completion from capture status.
-            attempt.status = 'RECONCILIATION_REQUIRED';
-            attempt.errorMessage = 'Reconciliation blocked: Capture details do not confirm refund completion. A genuine PayPal refund ID or verified webhook event is required.';
-            c.status = 'REFUND_PENDING';
-            c.updatedAt = new Date().toISOString();
-            db.scheduleSave();
-            throw new Error(`Refund attempt ${attempt.id} missing PayPal refund ID. Capture completion does not prove refund completion.`);
-          }
-
-          // Fetch genuine PayPal refund details
-          const refundDetails = await paypalGateway.getRefund(attempt.paypalRefundId);
-
-          if (refundDetails.isSimulated) {
-            // Labeled simulation path
-            attempt.status = 'SUCCEEDED';
-            attempt.completedAt = new Date().toISOString();
-            attempt.isSimulated = true;
-
-            if (c.activeApproval) {
-              c.activeApproval.status = 'CONSUMED';
-              if (db.refundApprovals[c.activeApproval.id]) {
-                db.refundApprovals[c.activeApproval.id].status = 'CONSUMED';
-              }
-            }
-
-            const reqCents = attempt.amountCents || toCents(attempt.amount);
-            const newRefundedCents = toCents(order.refundedAmount) + reqCents;
-            const grossCents = toCents(order.grossAmount);
-            const newRefundableCents = Math.max(0, grossCents - newRefundedCents);
-
-            order.refundedAmount = toDollars(newRefundedCents);
-            order.refundableAmount = toDollars(newRefundableCents);
-            order.status = newRefundableCents === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
-            c.status = newRefundableCents === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
-            c.updatedAt = new Date().toISOString();
-
-            const reconSuccessEvent: CaseEvent = {
-              id: `ev-log-${Date.now()}`,
-              caseId: c.id,
-              eventType: 'REFUND_RECONCILED',
-              actor: { type: 'PAYPAL_GATEWAY', name: 'Background Outbox Reconciler (Simulated)' },
-              summary: `Reconciled simulated refund attempt ${attempt.id}. Verified simulated settlement.`,
-              details: { refundAttemptId: attempt.id, status: 'SUCCEEDED', isSimulated: true },
-              timestamp: new Date().toISOString(),
-            };
-            c.timeline.push(reconSuccessEvent);
-            db.appendAuditEvent(reconSuccessEvent);
-            db.scheduleSave();
-            break;
-          }
-
-          // Live Sandbox PayPal refund validation
-          if (refundDetails.status === 'COMPLETED') {
-            // Validate refund ID and currency/amount if returned
-            if (refundDetails.id !== attempt.paypalRefundId) {
-              throw new Error(`Refund ID mismatch during reconciliation: expected ${attempt.paypalRefundId}, got ${refundDetails.id}`);
-            }
-
-            attempt.status = 'SUCCEEDED';
-            attempt.completedAt = new Date().toISOString();
-            attempt.paypalResponse = refundDetails.rawResponse;
-
-            if (c.activeApproval) {
-              c.activeApproval.status = 'CONSUMED';
-              if (db.refundApprovals[c.activeApproval.id]) {
-                db.refundApprovals[c.activeApproval.id].status = 'CONSUMED';
-              }
-            }
-
-            const reqCents = attempt.amountCents || toCents(attempt.amount);
-            const newRefundedCents = toCents(order.refundedAmount) + reqCents;
-            const grossCents = toCents(order.grossAmount);
-            const newRefundableCents = Math.max(0, grossCents - newRefundedCents);
-
-            order.refundedAmount = toDollars(newRefundedCents);
-            order.refundableAmount = toDollars(newRefundableCents);
-            order.status = newRefundableCents === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
-            c.status = newRefundableCents === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
-            c.updatedAt = new Date().toISOString();
-
-            const reconSuccessEvent: CaseEvent = {
-              id: `ev-log-${Date.now()}`,
-              caseId: c.id,
-              eventType: 'REFUND_RECONCILED',
+            const missingMsg =
+              'Reconciliation blocked: Capture details do not confirm refund completion. A genuine PayPal refund ID or verified webhook event is required.';
+            await db.finalizeRefundTransaction({
+              attemptId: attempt.id,
+              outcome: 'RECONCILIATION_REQUIRED',
+              errorMessage: missingMsg,
+              caseStatusOnNonSuccess: 'REFUND_PENDING',
               actor: { type: 'PAYPAL_GATEWAY', name: 'Background Outbox Reconciler' },
-              summary: `Reconciled uncertain refund attempt ${attempt.id}. Genuine PayPal refund confirmed COMPLETED (${refundDetails.id}).`,
-              details: { refundAttemptId: attempt.id, paypalRefundId: refundDetails.id, status: 'SUCCEEDED' },
-              timestamp: new Date().toISOString(),
-            };
-            c.timeline.push(reconSuccessEvent);
-            db.appendAuditEvent(reconSuccessEvent);
-            db.scheduleSave();
-          } else if (refundDetails.status === 'FAILED' || refundDetails.status === 'CANCELLED') {
-            attempt.status = 'FAILED';
-            attempt.errorMessage = `PayPal reported terminal refund failure with status: ${refundDetails.status}`;
-            c.status = 'REFUND_FAILED';
-            c.updatedAt = new Date().toISOString();
+              summary: `Reconciliation blocked for attempt ${attempt.id}: missing PayPal refund ID.`,
+              eventType: 'REFUND_RECONCILIATION_BLOCKED',
+              eventDetails: { refundAttemptId: attempt.id, status: 'RECONCILIATION_REQUIRED' },
+            });
+            throw new Error(
+              `Refund attempt ${attempt.id} missing PayPal refund ID. Capture completion does not prove refund completion.`
+            );
+          }
 
-            const failEvent: CaseEvent = {
-              id: `ev-log-${Date.now()}`,
-              caseId: c.id,
-              eventType: 'REFUND_FAILED',
+          // Fetch PayPal refund details (pass expected amount/currency for consistent simulation verification)
+          const refundDetails = await paypalGateway.getRefund(attempt.paypalRefundId, {
+            amount: attempt.amount,
+            currency: attempt.currency,
+          });
+
+          if (refundDetails.status === 'COMPLETED') {
+            // Validate refund ID, amount (integer cents), and currency strictly before finalizing
+            if (refundDetails.id !== attempt.paypalRefundId) {
+              const mismatchMsg = `Refund ID mismatch during reconciliation: expected ${attempt.paypalRefundId}, got ${refundDetails.id}`;
+              await db.finalizeRefundTransaction({
+                attemptId: attempt.id,
+                outcome: 'RECONCILIATION_REQUIRED',
+                errorMessage: mismatchMsg,
+                caseStatusOnNonSuccess: 'REFUND_UNKNOWN',
+                actor: { type: 'PAYPAL_GATEWAY', name: 'Background Outbox Reconciler' },
+                summary: mismatchMsg,
+                eventType: 'REFUND_RECONCILIATION_REQUIRED',
+                eventDetails: { refundAttemptId: attempt.id, expectedId: attempt.paypalRefundId, actualId: refundDetails.id },
+              });
+              throw new Error(mismatchMsg);
+            }
+
+            const expectedCents = attempt.amountCents ?? toCents(attempt.amount);
+            if (refundDetails.amount?.value !== undefined) {
+              const returnedCents = toCents(parseFloat(refundDetails.amount.value));
+              if (!Number.isFinite(returnedCents) || returnedCents !== expectedCents) {
+                const amountMsg = `Refund amount mismatch during reconciliation: expected ${expectedCents} cents, got ${returnedCents} cents`;
+                await db.finalizeRefundTransaction({
+                  attemptId: attempt.id,
+                  outcome: 'RECONCILIATION_REQUIRED',
+                  paypalRefundId: refundDetails.id,
+                  paypalResponse: refundDetails.rawResponse,
+                  errorMessage: amountMsg,
+                  caseStatusOnNonSuccess: 'REFUND_UNKNOWN',
+                  actor: { type: 'PAYPAL_GATEWAY', name: 'Background Outbox Reconciler' },
+                  summary: amountMsg,
+                  eventType: 'REFUND_RECONCILIATION_REQUIRED',
+                  eventDetails: { refundAttemptId: attempt.id, expectedCents, returnedCents },
+                });
+                throw new Error(amountMsg);
+              }
+            }
+
+            if (
+              refundDetails.amount?.currency_code &&
+              refundDetails.amount.currency_code.toUpperCase() !== attempt.currency.toUpperCase()
+            ) {
+              const currencyMsg = `Refund currency mismatch during reconciliation: expected ${attempt.currency}, got ${refundDetails.amount.currency_code}`;
+              await db.finalizeRefundTransaction({
+                attemptId: attempt.id,
+                outcome: 'RECONCILIATION_REQUIRED',
+                paypalRefundId: refundDetails.id,
+                paypalResponse: refundDetails.rawResponse,
+                errorMessage: currencyMsg,
+                caseStatusOnNonSuccess: 'REFUND_UNKNOWN',
+                actor: { type: 'PAYPAL_GATEWAY', name: 'Background Outbox Reconciler' },
+                summary: currencyMsg,
+                eventType: 'REFUND_RECONCILIATION_REQUIRED',
+                eventDetails: {
+                  refundAttemptId: attempt.id,
+                  expectedCurrency: attempt.currency,
+                  returnedCurrency: refundDetails.amount.currency_code,
+                },
+              });
+              throw new Error(currencyMsg);
+            }
+
+            await db.finalizeRefundTransaction({
+              attemptId: attempt.id,
+              outcome: 'SUCCEEDED',
+              paypalRefundId: refundDetails.id,
+              paypalResponse: refundDetails.rawResponse,
+              isSimulated: refundDetails.isSimulated,
+              actor: {
+                type: 'PAYPAL_GATEWAY',
+                name: refundDetails.isSimulated
+                  ? 'Background Outbox Reconciler (Simulated)'
+                  : 'Background Outbox Reconciler',
+              },
+              summary: refundDetails.isSimulated
+                ? `Reconciled simulated refund attempt ${attempt.id}. Verified simulated settlement.`
+                : `Reconciled uncertain refund attempt ${attempt.id}. Genuine PayPal refund confirmed COMPLETED (${refundDetails.id}).`,
+              eventType: 'REFUND_RECONCILED',
+              eventDetails: {
+                refundAttemptId: attempt.id,
+                paypalRefundId: refundDetails.id,
+                status: 'SUCCEEDED',
+                isSimulated: refundDetails.isSimulated,
+              },
+            });
+          } else if (refundDetails.status === 'FAILED' || refundDetails.status === 'CANCELLED') {
+            await db.finalizeRefundTransaction({
+              attemptId: attempt.id,
+              outcome: 'FAILED',
+              paypalRefundId: refundDetails.id,
+              paypalResponse: refundDetails.rawResponse,
+              errorMessage: `PayPal reported terminal refund failure with status: ${refundDetails.status}`,
+              caseStatusOnNonSuccess: 'REFUND_FAILED',
               actor: { type: 'PAYPAL_GATEWAY', name: 'Background Outbox Reconciler' },
               summary: `Reconciled refund attempt ${attempt.id}. PayPal confirmed terminal failure (${refundDetails.status}).`,
-              details: { refundAttemptId: attempt.id, paypalRefundId: refundDetails.id, status: refundDetails.status },
-              timestamp: new Date().toISOString(),
-            };
-            c.timeline.push(failEvent);
-            db.appendAuditEvent(failEvent);
-            db.scheduleSave();
+              eventType: 'REFUND_FAILED',
+              eventDetails: {
+                refundAttemptId: attempt.id,
+                paypalRefundId: refundDetails.id,
+                status: refundDetails.status,
+              },
+            });
           } else {
             // PENDING or UNKNOWN: Maintain pending, do NOT decrement balance
-            attempt.status = 'PENDING';
-            c.status = 'REFUND_PENDING';
-            c.updatedAt = new Date().toISOString();
-            db.scheduleSave();
-            throw new Error(`PayPal refund ${attempt.paypalRefundId} is still pending settlement (status: ${refundDetails.status})`);
+            await db.finalizeRefundTransaction({
+              attemptId: attempt.id,
+              outcome: 'PENDING',
+              paypalRefundId: refundDetails.id,
+              paypalResponse: refundDetails.rawResponse,
+              caseStatusOnNonSuccess: 'REFUND_PENDING',
+              actor: { type: 'PAYPAL_GATEWAY', name: 'Background Outbox Reconciler' },
+              summary: `Refund attempt ${attempt.id} still pending at PayPal (status: ${refundDetails.status}).`,
+              eventType: 'REFUND_RECONCILE_PENDING',
+              eventDetails: {
+                refundAttemptId: attempt.id,
+                paypalRefundId: refundDetails.id,
+                providerStatus: refundDetails.status,
+              },
+            });
+            throw new Error(
+              `PayPal refund ${attempt.paypalRefundId} is still pending settlement (status: ${refundDetails.status})`
+            );
           }
         } catch (gatewayErr: any) {
-          if ((event.attempts || 0) >= 4) {
-            attempt.status = 'RECONCILIATION_REQUIRED';
-            c.status = 'REFUND_UNKNOWN';
-            c.updatedAt = new Date().toISOString();
-            db.scheduleSave();
+          if ((event.attempts || 0) >= 4 && attempt.paypalRefundId) {
+            await db.finalizeRefundTransaction({
+              attemptId: attempt.id,
+              outcome: 'RECONCILIATION_REQUIRED',
+              errorMessage: gatewayErr.message || 'Max reconciliation retries reached',
+              caseStatusOnNonSuccess: 'REFUND_UNKNOWN',
+              actor: { type: 'PAYPAL_GATEWAY', name: 'Background Outbox Reconciler' },
+              summary: `Refund attempt ${attempt.id} moved to RECONCILIATION_REQUIRED after retry limit.`,
+              eventType: 'REFUND_RECONCILIATION_REQUIRED',
+              eventDetails: { refundAttemptId: attempt.id, error: gatewayErr.message },
+            }).catch(() => {});
           }
           throw gatewayErr;
         }

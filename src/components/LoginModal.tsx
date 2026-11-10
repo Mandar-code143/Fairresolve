@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Shield, Key, Building2, UserCheck, AlertCircle, Loader2, X, Lock } from 'lucide-react';
 import { User, UserRole } from '../types';
-import { setAuthToken } from '../utils/api';
+import { apiFetch, setAuthToken } from '../utils/api';
 
 interface DemoAccount {
   id: string;
@@ -31,7 +31,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onSucce
 
   useEffect(() => {
     if (isOpen) {
-      fetch('/api/v1/auth/demo-accounts')
+      apiFetch('/api/v1/auth/demo-accounts')
         .then((res) => res.json())
         .then((data) => {
           if (data.demoUsers) setDemoAccounts(data.demoUsers);
@@ -46,9 +46,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onSucce
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/v1/auth/demo-login', {
+      const res = await apiFetch('/api/v1/auth/demo-login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId: account.id }),
       });
       const data = await res.json();
@@ -69,9 +68,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onSucce
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/v1/auth/login', {
+      const res = await apiFetch('/api/v1/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
       });
       const data = await res.json();
@@ -92,9 +90,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onSucce
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/v1/auth/register', {
+      const res = await apiFetch('/api/v1/auth/register', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, email, password, companyName }),
       });
       const data = await res.json();

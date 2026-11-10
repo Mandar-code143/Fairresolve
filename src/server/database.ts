@@ -18,12 +18,15 @@ import path from 'path';
 import crypto from 'crypto';
 import pg from 'pg';
 import {
+  AIInvestigationResult,
   Case,
   CaseEvent,
   EvidenceObject,
   MerchantInvitation,
   Order,
   PayPalGatewayStatus,
+  PendingCheckout,
+  PolicyEvaluationResult,
   RefundApproval,
   RefundAttempt,
   RefundPolicy,
@@ -32,6 +35,7 @@ import {
   UserRole,
 } from '../types';
 import { paypalGateway } from './paypalGateway';
+import { runMigrations, verifyRequiredTables } from './database/migrations';
 import config from './config';
 
 export interface Session {
@@ -79,38 +83,57 @@ export interface DatabaseSchema {
   policies: Record<string, RefundPolicy[]>;
   refundAttempts: Record<string, RefundAttempt>;
   refundApprovals: Record<string, RefundApproval>;
+  pendingCheckouts: Record<string, PendingCheckout>;
   auditEvents: CaseEvent[];
   outbox: OutboxEvent[];
   invitations: Record<string, MerchantInvitation>;
 }
 
-const DATA_DIR = config.FAIRRESOLVE_STORAGE_DIR
-  ? path.resolve(config.FAIRRESOLVE_STORAGE_DIR)
-  : path.resolve(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'fairresolve_db.json');
+function resolveDataDir(): string {
+  const configured = config.FAIRRESOLVE_STORAGE_DIR || process.env.FAIRRESOLVE_STORAGE_DIR || '';
+  return configured.trim() ? path.resolve(configured.trim()) : path.resolve(process.cwd(), 'data');
+}
+
+function resolveDbFile(): string {
+  return path.join(resolveDataDir(), 'fairresolve_db.json');
+}
 
 export class Database {
   private data: DatabaseSchema;
   private saveDebounceTimer?: NodeJS.Timeout;
+  private writePromise: Promise<void> = Promise.resolve();
   private pgPool?: pg.Pool;
   private isPostgresConnected: boolean = false;
+  private isDataLoadedFromPg: boolean = false;
+  private connectionEpoch: number = 0;
   private processedWebhookIds: Set<string> = new Set();
   private readyPromise: Promise<void>;
 
   constructor() {
-    if (!fs.existsSync(DATA_DIR)) {
-      try {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-      } catch (_) {}
+    const dataDir = resolveDataDir();
+    const dbFile = resolveDbFile();
+
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
     }
 
-    if (fs.existsSync(DB_FILE)) {
+    if (fs.existsSync(dbFile)) {
       try {
-        const raw = fs.readFileSync(DB_FILE, 'utf-8');
+        const raw = fs.readFileSync(dbFile, 'utf-8');
         this.data = JSON.parse(raw);
+        if (!this.data.pendingCheckouts) {
+          this.data.pendingCheckouts = {};
+        }
+        if (!this.data.invitations) {
+          this.data.invitations = {};
+        }
+        if (!this.data.refundApprovals) {
+          this.data.refundApprovals = {};
+        }
       } catch (err) {
         console.warn('Failed to parse database file, re-initializing schema:', err);
         this.data = this.getDefaultSchema();
+        this.seedInitialData();
         this.saveSync();
       }
     } else {
@@ -127,119 +150,190 @@ export class Database {
       throw err;
     }
 
-    this.readyPromise = this.initPostgres().catch((err) => {
-      if (process.env.NODE_ENV === 'production') {
-        console.error('[Database] Unhandled PostgreSQL connection error in production:', err);
-      }
-      throw err;
-    });
-    this.readyPromise.catch(() => {});
+    // In NODE_ENV === 'test', do not race unrelated in-memory unit tests with background PG auto-connect
+    // unless FAIRRESOLVE_AUTO_INIT_PG_IN_TEST === 'true'. Real PG integration tests invoke initPostgres() explicitly.
+    if (process.env.NODE_ENV === 'test' && process.env.FAIRRESOLVE_AUTO_INIT_PG_IN_TEST !== 'true') {
+      this.readyPromise = Promise.resolve();
+    } else {
+      this.readyPromise = this.initPostgres().catch((err) => {
+        if (process.env.NODE_ENV === 'production') {
+          console.error('[Database] Unhandled PostgreSQL connection error in production:', err);
+        }
+        throw err;
+      });
+      this.readyPromise.catch(() => {});
+    }
   }
 
   public async waitForReady(): Promise<void> {
     await this.readyPromise;
   }
 
-  public async initPostgres() {
-    const dbUrl = process.env.DATABASE_URL;
+  public async initPostgres(overrideUrl?: string) {
+    const dbUrl = overrideUrl || process.env.DATABASE_URL;
+    const isProduction = process.env.NODE_ENV === 'production';
 
-    if (process.env.NODE_ENV === 'production' && (!dbUrl || dbUrl.trim() === '')) {
+    if (isProduction && (!dbUrl || dbUrl.trim() === '')) {
       console.error('[Database] FATAL: Production environment requires DATABASE_URL to be configured.');
       throw new Error('Production database connection failed: DATABASE_URL is required in production.');
     }
 
-    if (dbUrl && dbUrl.trim() !== '') {
-      try {
-        this.pgPool = new pg.Pool({ connectionString: dbUrl, max: 10 });
-        const client = await this.pgPool.connect();
-        try {
-          // Verify or create schema migrations registry
-          await client.query(`
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-              version INT PRIMARY KEY,
-              name VARCHAR(255) NOT NULL,
-              applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-          `);
+    if (!dbUrl || dbUrl.trim() === '') {
+      return;
+    }
 
-          const res = await client.query('SELECT version FROM schema_migrations WHERE version = 1');
-          if (res.rows.length === 0) {
-            const candidates = [
-              path.resolve(__dirname, 'database', 'schema.sql'),
-              path.resolve(__dirname, '../src/server/database/schema.sql'),
-              path.resolve(process.cwd(), 'src/server/database/schema.sql'),
-              path.resolve(process.cwd(), 'dist/database/schema.sql'),
-            ];
-            const schemaPath = candidates.find((p) => fs.existsSync(p));
-            if (schemaPath) {
-              const sql = fs.readFileSync(schemaPath, 'utf-8');
-              await client.query(sql);
-              await client.query('INSERT INTO schema_migrations (version, name) VALUES (1, $1)', ['initial_relational_schema']);
-              console.log('[Database] Applied migration 1: initial_relational_schema from ' + schemaPath);
-            }
-          }
-          this.isPostgresConnected = true;
-          console.log('[Database] PostgreSQL connected and schema verified successfully.');
-        } finally {
-          client.release();
-        }
+    const epoch = ++this.connectionEpoch;
+    let pool: pg.Pool | undefined;
 
-        await this.syncInitialDataToPostgres();
-        await this.loadFromPostgres();
-      } catch (err: any) {
-        if (process.env.NODE_ENV === 'production' || process.env.DATABASE_URL) {
-          console.error('[Database] FATAL: PostgreSQL connection failed:', err.message);
-          throw new Error(`Production database connection failed: ${err.message}`);
-        }
-        console.warn('[Database] PostgreSQL connection failed, operating with durable atomic persistence:', err.message);
-        this.isPostgresConnected = false;
+    try {
+      pool = new pg.Pool({
+        connectionString: dbUrl,
+        max: 10,
+        connectionTimeoutMillis: 5000,
+        idleTimeoutMillis: 30000,
+      });
+
+      pool.on('error', (poolErr) => {
+        console.error('[Database] Unexpected PostgreSQL pool error:', poolErr.message);
+      });
+
+      // 1. Verify connectivity
+      await pool.query('SELECT 1');
+
+      // 2. Execute all pending versioned migrations
+      await runMigrations(pool);
+
+      // 3. Verify all required tables exist
+      const missingTables = await verifyRequiredTables(pool);
+      if (missingTables.length > 0) {
+        throw new Error(`Missing required PostgreSQL tables after migrations: ${missingTables.join(', ')}`);
       }
+
+      if (this.connectionEpoch !== epoch) {
+        await pool.end().catch(() => {});
+        return;
+      }
+
+      // Clean up any previous pool if reinitializing
+      if (this.pgPool && this.pgPool !== pool) {
+        await this.pgPool.end().catch(() => {});
+      }
+      this.pgPool = pool;
+
+      // 4. Sync initial seed records if database is empty, then load authoritative records
+      await this.syncInitialDataToPostgres(true);
+      await this.loadFromPostgres(true);
+
+      // 5. Verify storage path in non-test environments
+      if (isProduction) {
+        const storageOk = this.verifyStorageWritable();
+        if (!storageOk) {
+          throw new Error(`Persistent storage directory is not writable: ${resolveDataDir()}`);
+        }
+      }
+
+      if (this.connectionEpoch !== epoch) {
+        return;
+      }
+
+      // Mark PostgreSQL active ONLY after every step succeeded
+      this.isPostgresConnected = true;
+      this.isDataLoadedFromPg = true;
+      this.readyPromise = Promise.resolve();
+      console.log('[Database] PostgreSQL connected, migrated, seeded, and loaded successfully.');
+    } catch (err: any) {
+      if (pool && pool !== this.pgPool) {
+        await pool.end().catch(() => {});
+      }
+      this.isPostgresConnected = false;
+      this.isDataLoadedFromPg = false;
+
+      if (isProduction || overrideUrl) {
+        console.error('[Database] FATAL: PostgreSQL initialization failed:', err.message);
+        throw new Error(`Production database connection failed: ${err.message}`);
+      }
+      console.warn('[Database] PostgreSQL connection failed, operating with local durable JSON persistence:', err.message);
     }
   }
 
   public setPostgresConnected(active: boolean, pool?: pg.Pool) {
+    this.connectionEpoch++;
     this.isPostgresConnected = active;
     this.pgPool = pool;
+    this.isDataLoadedFromPg = active;
     this.readyPromise = Promise.resolve();
   }
 
   /**
-   * Test-only initialization allowing injection of in-memory or mock PostgreSQL pool
+   * Test-only initialization allowing injection of in-memory or real PostgreSQL pool
    */
   public async initTestPostgres(pool: pg.Pool) {
+    this.connectionEpoch++;
     this.pgPool = pool;
-    this.isPostgresConnected = true;
+    this.isPostgresConnected = false;
     this.readyPromise = Promise.resolve();
 
-    const client = await this.pgPool.connect();
-    try {
-      const res = await client.query("SELECT 1 FROM information_schema.tables WHERE table_name = 'tenants'").catch(() => ({ rows: [] }));
-      if (res.rows.length === 0) {
-        const candidates = [
-          path.resolve(__dirname, 'database', 'schema.sql'),
-          path.resolve(__dirname, '../src/server/database/schema.sql'),
-          path.resolve(process.cwd(), 'src/server/database/schema.sql'),
-          path.resolve(process.cwd(), 'dist/database/schema.sql'),
-        ];
-        const schemaPath = candidates.find((p) => fs.existsSync(p));
-        if (schemaPath) {
-          const sql = fs.readFileSync(schemaPath, 'utf-8');
-          await client.query(sql);
-        }
-      }
-    } finally {
-      client.release();
+    await runMigrations(pool);
+    const missingTables = await verifyRequiredTables(pool);
+    if (missingTables.length > 0) {
+      throw new Error(`Missing required PostgreSQL tables in test pool: ${missingTables.join(', ')}`);
     }
 
-    await this.syncInitialDataToPostgres();
-    await this.loadFromPostgres();
+    await this.syncInitialDataToPostgres(true);
+    await this.loadFromPostgres(true);
+    this.isPostgresConnected = true;
+    this.isDataLoadedFromPg = true;
+  }
+
+  public async pingPostgres(): Promise<boolean> {
+    if (!this.pgPool || !this.isPostgresConnected) return false;
+    try {
+      await this.pgPool.query('SELECT 1');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public getDataDir(): string {
+    return resolveDataDir();
+  }
+
+  public verifyStorageWritable(): boolean {
+    try {
+      const dataDir = resolveDataDir();
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true });
+      }
+      const probeFile = path.join(dataDir, `.write-probe-${process.pid}-${Date.now()}`);
+      fs.writeFileSync(probeFile, 'ok');
+      fs.unlinkSync(probeFile);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public isInitialDataLoaded(): boolean {
+    return Object.keys(this.data.tenants).length > 0 && (this.isPostgresConnected ? this.isDataLoadedFromPg : true);
+  }
+
+  public async closePool(): Promise<void> {
+    this.isPostgresConnected = false;
+    if (this.pgPool) {
+      const p = this.pgPool;
+      this.pgPool = undefined;
+      if (typeof (p as any).end === 'function') {
+        await p.end().catch(() => {});
+      }
+    }
   }
 
   /**
    * Seed relational PostgreSQL tables from in-memory initial state if empty
    */
-  public async syncInitialDataToPostgres() {
-    if (!this.pgPool || !this.isPostgresConnected) return;
+  public async syncInitialDataToPostgres(forceInit: boolean = false) {
+    if (!this.pgPool || (!this.isPostgresConnected && !forceInit)) return;
 
     try {
       const tenantCheck = await this.pgPool.query('SELECT COUNT(*) as count FROM tenants');
@@ -302,8 +396,8 @@ export class Database {
               id, tenant_id, paypal_order_id, paypal_capture_id, order_number, buyer_name,
               buyer_email, currency, gross_amount_cents, shipping_amount_cents,
               refunded_amount_cents, refundable_amount_cents, shipping_carrier, tracking_number,
-              delivery_date, status, transaction_date
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+              tracking_synthetic, delivery_date, status, is_simulated, transaction_date
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
             ON CONFLICT (id) DO NOTHING`,
             [
               o.id,
@@ -320,8 +414,10 @@ export class Database {
               Math.round(o.refundableAmount * 100),
               o.shippingCarrier || null,
               o.trackingNumber || null,
+              o.trackingSynthetic ?? true,
               o.deliveryDate || null,
               o.status,
+              o.isSimulated ?? false,
               o.transactionDate,
             ]
           );
@@ -375,6 +471,15 @@ export class Database {
             ]
           );
 
+          if (c.customerAccessToken) {
+            const tokenHash = crypto.createHash('sha256').update(c.customerAccessToken).digest('hex');
+            await this.pgPool.query(
+              `INSERT INTO customer_access_tokens (id, case_id, token_hash, expires_at)
+               VALUES ($1, $2, $3, $4) ON CONFLICT (token_hash) DO NOTHING`,
+              [`cat-${c.id}`, c.id, tokenHash, c.tokenExpiresAt]
+            );
+          }
+
           if (c.evidence) {
             for (const ev of c.evidence) {
               await this.pgPool.query(
@@ -406,6 +511,10 @@ export class Database {
         }
       }
     } catch (err: any) {
+      if (process.env.NODE_ENV === 'production' || forceInit) {
+        console.error('[Database] Critical seed sync to PostgreSQL failed:', err.message);
+        throw err;
+      }
       console.warn('[Database] Sync to PostgreSQL encountered an issue:', err.message);
     }
   }
@@ -413,8 +522,8 @@ export class Database {
   /**
    * Authoritative read from PostgreSQL: populates internal state strictly from DB tables
    */
-  public async loadFromPostgres() {
-    if (!this.pgPool || !this.isPostgresConnected) return;
+  public async loadFromPostgres(forceInit: boolean = false) {
+    if (!this.pgPool || (!this.isPostgresConnected && !forceInit)) return;
 
     try {
       // 1. Tenants
@@ -462,7 +571,7 @@ export class Database {
       }
 
       // 4. Policies
-      const pRes = await this.pgPool.query('SELECT * FROM policies');
+      const pRes = await this.pgPool.query('SELECT * FROM policies ORDER BY published_at ASC');
       for (const row of pRes.rows) {
         if (!this.data.policies[row.tenant_id]) {
           this.data.policies[row.tenant_id] = [];
@@ -520,19 +629,22 @@ export class Database {
           refundableAmount: Number(row.refundable_amount_cents) / 100,
           shippingCarrier: row.shipping_carrier || undefined,
           trackingNumber: row.tracking_number || undefined,
+          trackingSynthetic: row.tracking_synthetic !== undefined ? Boolean(row.tracking_synthetic) : true,
           deliveryDate: row.delivery_date ? new Date(row.delivery_date).toISOString() : undefined,
           status: row.status,
+          isSimulated: row.is_simulated !== undefined ? Boolean(row.is_simulated) : false,
           transactionDate: row.transaction_date ? new Date(row.transaction_date).toISOString() : new Date().toISOString(),
           items: itemsByOrder[row.id] || [],
         };
       }
 
-      // 6. Cases & Evidence
+      // 6. Cases, Evidence, Policy Evaluations & AI Runs
       const cRes = await this.pgPool.query('SELECT * FROM cases');
       const evRes = await this.pgPool.query('SELECT * FROM evidence_objects');
       const evByCase: Record<string, EvidenceObject[]> = {};
       for (const evRow of evRes.rows) {
         if (!evByCase[evRow.case_id]) evByCase[evRow.case_id] = [];
+        const existingThumb = this.data.cases[evRow.case_id]?.evidence?.find((e) => e.id === evRow.id)?.thumbnailBase64;
         evByCase[evRow.case_id].push({
           id: evRow.id,
           caseId: evRow.case_id,
@@ -546,9 +658,47 @@ export class Database {
           scanStatus: evRow.scan_status,
           evidenceType: evRow.evidence_type,
           caption: evRow.caption || undefined,
-          downloadUrl: evRow.storage_path || `/api/v1/evidence/${evRow.id}/file`,
+          downloadUrl: `/api/v1/evidence/${evRow.id}/file`,
+          thumbnailBase64: existingThumb,
           uploadedAt: evRow.uploaded_at ? new Date(evRow.uploaded_at).toISOString() : new Date().toISOString(),
         });
+      }
+
+      const peRes = await this.pgPool.query('SELECT * FROM policy_evaluations ORDER BY evaluated_at ASC');
+      const latestEvalByCase: Record<string, PolicyEvaluationResult> = {};
+      for (const peRow of peRes.rows) {
+        latestEvalByCase[peRow.case_id] = {
+          result: peRow.result,
+          policy_version: peRow.policy_version,
+          eligible_amount: peRow.eligible_amount_cents !== null && peRow.eligible_amount_cents !== undefined
+            ? Number(peRow.eligible_amount_cents) / 100
+            : null,
+          missing_requirements: typeof peRow.missing_requirements === 'string' ? JSON.parse(peRow.missing_requirements) : peRow.missing_requirements || [],
+          reason_codes: typeof peRow.reason_codes === 'string' ? JSON.parse(peRow.reason_codes) : peRow.reason_codes || [],
+          rules_evaluated: typeof peRow.rules_evaluated === 'string' ? JSON.parse(peRow.rules_evaluated) : peRow.rules_evaluated || [],
+          evaluated_at: peRow.evaluated_at ? new Date(peRow.evaluated_at).toISOString() : new Date().toISOString(),
+        };
+      }
+
+      const aiRes = await this.pgPool.query('SELECT * FROM ai_runs ORDER BY analyzed_at ASC');
+      const latestAiByCase: Record<string, AIInvestigationResult> = {};
+      for (const aiRow of aiRes.rows) {
+        const existingCase = this.data.cases[aiRow.case_id];
+        latestAiByCase[aiRow.case_id] = {
+          issue_type: existingCase?.issueType || 'damaged_item',
+          customer_claim: aiRow.customer_claim,
+          reported_facts: typeof aiRow.reported_facts === 'string' ? JSON.parse(aiRow.reported_facts) : aiRow.reported_facts || [],
+          evidence_observations: typeof aiRow.evidence_observations === 'string' ? JSON.parse(aiRow.evidence_observations) : aiRow.evidence_observations || [],
+          missing_information: typeof aiRow.missing_information === 'string' ? JSON.parse(aiRow.missing_information) : aiRow.missing_information || [],
+          inconsistencies: typeof aiRow.inconsistencies === 'string' ? JSON.parse(aiRow.inconsistencies) : aiRow.inconsistencies || [],
+          policy_references: typeof aiRow.policy_references === 'string' ? JSON.parse(aiRow.policy_references) : aiRow.policy_references || [],
+          limitations: typeof aiRow.limitations === 'string' ? JSON.parse(aiRow.limitations) : aiRow.limitations || [],
+          recommended_next_step: aiRow.recommended_next_step,
+          explanation: aiRow.explanation,
+          analyzed_at: aiRow.analyzed_at ? new Date(aiRow.analyzed_at).toISOString() : new Date().toISOString(),
+          model_used: aiRow.model_used,
+          is_fallback: Boolean(aiRow.is_fallback),
+        };
       }
 
       for (const row of cRes.rows) {
@@ -570,26 +720,27 @@ export class Database {
           customerAccessToken: existing?.customerAccessToken || `tok_${row.id}`,
           tokenExpiresAt: existing?.tokenExpiresAt || new Date(Date.now() + 86400000 * 30).toISOString(),
           evidence: evByCase[row.id] || existing?.evidence || [],
-          aiInvestigation: existing?.aiInvestigation,
-          policyEvaluation: existing?.policyEvaluation,
+          aiInvestigation: latestAiByCase[row.id] || existing?.aiInvestigation,
+          policyEvaluation: latestEvalByCase[row.id] || existing?.policyEvaluation,
           activeApproval: existing?.activeApproval,
           refundAttempts: existing?.refundAttempts || [],
           timeline: existing?.timeline || [],
           merchantNotes: row.merchant_notes || undefined,
           assignedTo: row.assigned_to || undefined,
+          assignedToName: row.assigned_to ? this.data.users[row.assigned_to]?.name : existing?.assignedToName,
           createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
           updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
         };
       }
 
       // 7. Refund Approvals
-      const appRes = await this.pgPool.query('SELECT * FROM refund_approvals');
+      const appRes = await this.pgPool.query('SELECT * FROM refund_approvals ORDER BY created_at ASC');
       for (const row of appRes.rows) {
         const approval: RefundApproval = {
           id: row.id,
           caseId: row.case_id,
           tenantId: row.tenant_id,
-          orderId: this.data.cases[row.case_id]?.orderId || 'ord-unknown',
+          orderId: row.order_id || this.data.cases[row.case_id]?.orderId || 'ord-unknown',
           authorizedBy: row.authorized_by,
           authorizedByName: this.data.users[row.authorized_by]?.name || 'Authorized Approver',
           authorizedByRole: this.data.users[row.authorized_by]?.role || 'REVIEWER',
@@ -599,10 +750,14 @@ export class Database {
           captureId: row.capture_id,
           caseVersion: row.case_version,
           policyVersion: row.policy_version,
+          policyEvaluationId: row.policy_evaluation_id || undefined,
           notes: row.notes || undefined,
           status: row.status,
           createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
-          expiresAt: new Date((row.created_at ? new Date(row.created_at).getTime() : Date.now()) + 86400000 * 7).toISOString(),
+          expiresAt: row.expires_at
+            ? new Date(row.expires_at).toISOString()
+            : new Date((row.created_at ? new Date(row.created_at).getTime() : Date.now()) + 86400000 * 7).toISOString(),
+          consumedAt: row.consumed_at ? new Date(row.consumed_at).toISOString() : undefined,
         };
         this.data.refundApprovals[row.id] = approval;
         if (this.data.cases[row.case_id] && approval.status === 'ACTIVE') {
@@ -610,20 +765,27 @@ export class Database {
         }
       }
 
-      // 8. Refund Attempts
-      const attRes = await this.pgPool.query('SELECT * FROM refund_attempts');
+      // 8. Refund Attempts (normalize legacy 'COMPLETED' rows to canonical 'SUCCEEDED')
+      const attRes = await this.pgPool.query('SELECT * FROM refund_attempts ORDER BY created_at ASC');
       for (const row of attRes.rows) {
+        const rawStatus = String(row.status || 'RESERVED').toUpperCase();
+        const normalizedStatus = (rawStatus === 'COMPLETED' ? 'SUCCEEDED' : rawStatus) as RefundAttempt['status'];
+        const executorId = row.executor_id || row.authorized_by_user_id;
+
         const attempt: RefundAttempt = {
           id: row.id,
           caseId: row.case_id,
           approvalId: row.approval_id || undefined,
+          approverId: row.approver_id || undefined,
+          executorId,
           captureId: row.capture_id,
           idempotencyKey: row.idempotency_key,
+          requestFingerprint: row.request_fingerprint || undefined,
           amount: Number(row.amount_cents) / 100,
           amountCents: Number(row.amount_cents),
           currency: row.currency,
           reason: row.reason,
-          status: row.status,
+          status: normalizedStatus,
           paypalRefundId: row.paypal_refund_id || undefined,
           paypalResponse: row.paypal_response ? JSON.parse(JSON.stringify(row.paypal_response)) : undefined,
           errorCode: row.error_code || undefined,
@@ -640,13 +802,98 @@ export class Database {
         this.data.refundAttempts[row.id] = attempt;
         if (this.data.cases[row.case_id]) {
           const c = this.data.cases[row.case_id];
-          if (!c.refundAttempts.some((a) => a.id === attempt.id)) {
+          const existingIdx = c.refundAttempts.findIndex((a) => a.id === attempt.id);
+          if (existingIdx >= 0) {
+            c.refundAttempts[existingIdx] = attempt;
+          } else {
             c.refundAttempts.push(attempt);
           }
         }
       }
 
-      // 9. Webhooks
+      // 9. Invitations
+      const invRes = await this.pgPool.query('SELECT * FROM invitations');
+      for (const row of invRes.rows) {
+        this.data.invitations[row.id] = {
+          id: row.id,
+          tenantId: row.tenant_id,
+          email: row.email,
+          role: row.role as UserRole,
+          tokenHash: row.token_hash,
+          invitedByUserId: row.invited_by || '',
+          invitedByName: row.invited_by ? this.data.users[row.invited_by]?.name || 'Admin' : 'Admin',
+          status: row.status,
+          expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : new Date().toISOString(),
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          acceptedAt: row.accepted_at ? new Date(row.accepted_at).toISOString() : undefined,
+        };
+      }
+
+      // 10. Pending Checkouts
+      const pcRes = await this.pgPool.query('SELECT * FROM pending_checkouts');
+      if (!this.data.pendingCheckouts) this.data.pendingCheckouts = {};
+      for (const row of pcRes.rows) {
+        this.data.pendingCheckouts[row.id] = {
+          id: row.id,
+          tenantId: row.tenant_id,
+          createdBy: row.created_by,
+          paypalOrderId: row.paypal_order_id,
+          orderNumber: row.order_number,
+          productType: row.product_type,
+          productSku: row.product_sku,
+          productName: row.product_name,
+          quantity: Number(row.quantity),
+          unitPrice: Number(row.unit_price_cents) / 100,
+          unitPriceCents: Number(row.unit_price_cents),
+          shippingAmount: Number(row.shipping_amount_cents) / 100,
+          shippingAmountCents: Number(row.shipping_amount_cents),
+          grossAmount: Number(row.gross_amount_cents) / 100,
+          grossAmountCents: Number(row.gross_amount_cents),
+          currency: row.currency,
+          buyerName: row.buyer_name || undefined,
+          buyerEmail: row.buyer_email || undefined,
+          stateTokenHash: row.state_token_hash,
+          status: row.status,
+          isSimulated: Boolean(row.is_simulated),
+          approveUrl: row.approve_url || undefined,
+          capturedOrderId: row.captured_order_id || undefined,
+          capturedCaseId: row.captured_case_id || undefined,
+          failureReason: row.failure_reason || undefined,
+          expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : new Date().toISOString(),
+          capturedAt: row.captured_at ? new Date(row.captured_at).toISOString() : undefined,
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+        };
+      }
+
+      // 11. Audit Events
+      const aeRes = await this.pgPool.query('SELECT * FROM audit_events ORDER BY timestamp ASC');
+      for (const row of aeRes.rows) {
+        const ae: CaseEvent = {
+          id: row.id,
+          caseId: row.case_id || '',
+          eventType: row.event_type,
+          actor: {
+            type: row.actor_type,
+            id: row.actor_id || undefined,
+            name: row.actor_name,
+            role: row.actor_role || undefined,
+          },
+          summary: row.summary,
+          details: row.details ? (typeof row.details === 'string' ? JSON.parse(row.details) : row.details) : undefined,
+          timestamp: row.timestamp ? new Date(row.timestamp).toISOString() : new Date().toISOString(),
+          previousHash: row.previous_hash,
+          currentHash: row.current_hash,
+        };
+        if (!this.data.auditEvents.some((e) => e.id === ae.id)) {
+          this.data.auditEvents.push(ae);
+        }
+        if (ae.caseId && this.data.cases[ae.caseId] && !this.data.cases[ae.caseId].timeline.some((e) => e.id === ae.id)) {
+          this.data.cases[ae.caseId].timeline.push(ae);
+        }
+      }
+
+      // 12. Webhooks
       const whRes = await this.pgPool.query('SELECT event_id FROM paypal_webhook_events WHERE processed = true');
       for (const row of whRes.rows) {
         this.processedWebhookIds.add(row.event_id);
@@ -654,6 +901,10 @@ export class Database {
 
       console.log('[Database] Loaded authoritative records from PostgreSQL successfully.');
     } catch (err: any) {
+      if (process.env.NODE_ENV === 'production' || forceInit) {
+        console.error('[Database] Critical failure loading authoritative data from PostgreSQL:', err.message);
+        throw err;
+      }
       console.error('[Database] Failed to load data from PostgreSQL:', err.message);
     }
   }
@@ -763,6 +1014,16 @@ export class Database {
           [params.idempotencyKey]
         );
         if (existingKeyRes.rows.length > 0) {
+          const existingRow = existingKeyRes.rows[0];
+          if (
+            existingRow.request_fingerprint &&
+            params.requestFingerprint &&
+            existingRow.request_fingerprint !== params.requestFingerprint
+          ) {
+            const err: any = new Error('Idempotency key parameter mismatch: request parameters differ from original submission.');
+            err.statusCode = 422;
+            throw err;
+          }
           const err: any = new Error(`Concurrent refund attempt detected with matching idempotency key: ${params.idempotencyKey}`);
           err.statusCode = 409;
           throw err;
@@ -772,16 +1033,20 @@ export class Database {
         const attemptId = `ref-att-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
         await client.query(
           `INSERT INTO refund_attempts (
-            id, case_id, tenant_id, approval_id, capture_id, idempotency_key,
-            amount_cents, currency, reason, status, authorized_by_user_id, is_simulated, created_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'RESERVED', $10, $11, CURRENT_TIMESTAMP)`,
+            id, case_id, tenant_id, approval_id, approver_id, executor_id, capture_id,
+            idempotency_key, request_fingerprint, amount_cents, currency, reason, status,
+            authorized_by_user_id, is_simulated, created_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'RESERVED', $13, $14, CURRENT_TIMESTAMP)`,
           [
             attemptId,
             params.caseId,
             params.tenantId,
             params.approvalId || null,
+            params.approverId || null,
+            params.executorId,
             params.captureId,
             params.idempotencyKey,
+            params.requestFingerprint || null,
             params.amountCents,
             params.currency,
             params.reason,
@@ -900,15 +1165,467 @@ export class Database {
   }
 
   /**
+   * Centralized Atomic Refund Finalization Transaction
+   * Executes within a single PostgreSQL transaction (SELECT ... FOR UPDATE locks)
+   * ensuring order balances, approvals, case state, and audit ledger update atomically.
+   */
+  public async finalizeRefundTransaction(params: {
+    attemptId: string;
+    outcome: 'SUCCEEDED' | 'PENDING' | 'FAILED' | 'RECONCILIATION_REQUIRED';
+    paypalRefundId?: string;
+    paypalResponse?: any;
+    completedAt?: string;
+    errorCode?: string;
+    errorMessage?: string;
+    isSimulated?: boolean;
+    caseStatusOnNonSuccess?: Case['status'];
+    actor: CaseEvent['actor'];
+    summary: string;
+    eventType: CaseEvent['eventType'];
+    eventDetails?: Record<string, any>;
+  }): Promise<{
+    alreadyFinalized: boolean;
+    refundAttempt: RefundAttempt;
+    order?: Order;
+    case?: Case;
+  }> {
+    const buildHashChainedEvent = (caseId: string, tenantId: string): CaseEvent => {
+      const nowIso = new Date().toISOString();
+      const lastEvent = this.data.auditEvents[this.data.auditEvents.length - 1];
+      const previousHash =
+        lastEvent?.currentHash || '0000000000000000000000000000000000000000000000000000000000000000';
+      const storedDetails = { ...(params.eventDetails || {}), tenantId };
+      const payload = `${previousHash}|${caseId}|${params.eventType}|${nowIso}|${JSON.stringify(storedDetails)}`;
+      const currentHash = crypto.createHash('sha256').update(payload).digest('hex');
+
+      return {
+        id: `ev-log-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+        caseId,
+        eventType: params.eventType,
+        actor: params.actor,
+        summary: params.summary,
+        details: storedDetails,
+        timestamp: nowIso,
+        previousHash,
+        currentHash,
+      };
+    };
+
+    if (this.isPostgresConnected && this.pgPool) {
+      return await this.withTransaction(async (client) => {
+        // 1. Lock the refund_attempts row
+        const attRes = await client.query(
+          'SELECT * FROM refund_attempts WHERE id = $1 FOR UPDATE',
+          [params.attemptId]
+        );
+        if (attRes.rows.length === 0) {
+          throw new Error(`Refund attempt ${params.attemptId} not found in PostgreSQL during finalization.`);
+        }
+        const attRow = attRes.rows[0];
+        const currentRawStatus = String(attRow.status || '').toUpperCase();
+
+        // 2. Lock the associated case row
+        const caseRes = await client.query(
+          'SELECT * FROM cases WHERE id = $1 FOR UPDATE',
+          [attRow.case_id]
+        );
+        if (caseRes.rows.length === 0) {
+          throw new Error(`Case ${attRow.case_id} not found in PostgreSQL during finalization.`);
+        }
+        const caseRow = caseRes.rows[0];
+
+        // 3. Lock the associated order row
+        const orderRes = await client.query(
+          'SELECT * FROM orders WHERE id = $1 FOR UPDATE',
+          [caseRow.order_id]
+        );
+        if (orderRes.rows.length === 0) {
+          throw new Error(`Order ${caseRow.order_id} not found in PostgreSQL during finalization.`);
+        }
+        const orderRow = orderRes.rows[0];
+
+        // 4. Idempotency guard: never apply a finalized refund twice
+        if (currentRawStatus === 'SUCCEEDED' || currentRawStatus === 'COMPLETED') {
+          const existingAttempt = this.data.refundAttempts[attRow.id] || {
+            id: attRow.id,
+            caseId: attRow.case_id,
+            approvalId: attRow.approval_id || undefined,
+            captureId: attRow.capture_id,
+            idempotencyKey: attRow.idempotency_key,
+            amount: Number(attRow.amount_cents) / 100,
+            amountCents: Number(attRow.amount_cents),
+            currency: attRow.currency,
+            reason: attRow.reason,
+            status: 'SUCCEEDED',
+            paypalRefundId: attRow.paypal_refund_id || undefined,
+            isSimulated: Boolean(attRow.is_simulated),
+            authorizedBy: {
+              userId: attRow.authorized_by_user_id,
+              userName: this.data.users[attRow.authorized_by_user_id]?.name || 'Operator',
+              userRole: this.data.users[attRow.authorized_by_user_id]?.role || 'ADMIN',
+            },
+            createdAt: attRow.created_at ? new Date(attRow.created_at).toISOString() : new Date().toISOString(),
+            completedAt: attRow.completed_at ? new Date(attRow.completed_at).toISOString() : undefined,
+          };
+          return {
+            alreadyFinalized: true,
+            refundAttempt: existingAttempt,
+            order: this.data.orders[orderRow.id],
+            case: this.data.cases[caseRow.id],
+          };
+        }
+
+        const attemptCents = BigInt(attRow.amount_cents);
+        const grossCents = BigInt(orderRow.gross_amount_cents);
+        const currentRefundedCents = BigInt(orderRow.refunded_amount_cents);
+        const currentRefundableCents = BigInt(orderRow.refundable_amount_cents);
+
+        let nextOrderStatus: Order['status'] = orderRow.status;
+        let nextCaseStatus: Case['status'] = caseRow.status;
+        let newRefundedCents = currentRefundedCents;
+        let newRefundableCents = currentRefundableCents;
+        const resolvedCompletedAt = params.completedAt || new Date().toISOString();
+
+        if (params.outcome === 'SUCCEEDED') {
+          if (attemptCents <= 0n || attemptCents > currentRefundableCents) {
+            throw new Error(
+              `Finalization rejected: attempt amount (${Number(attemptCents) / 100}) exceeds remaining PostgreSQL refundable balance (${Number(currentRefundableCents) / 100} ${orderRow.currency}).`
+            );
+          }
+
+          newRefundedCents = currentRefundedCents + attemptCents;
+          newRefundableCents = grossCents - newRefundedCents;
+          if (newRefundableCents < 0n) {
+            throw new Error('Invariant violation: refundable balance would become negative.');
+          }
+          nextOrderStatus = newRefundableCents === 0n ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+          nextCaseStatus = newRefundableCents === 0n ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+
+          // Update refund_attempts to SUCCEEDED
+          await client.query(
+            `UPDATE refund_attempts
+             SET status = 'SUCCEEDED',
+                 paypal_refund_id = COALESCE($1, paypal_refund_id),
+                 paypal_response = COALESCE($2, paypal_response),
+                 completed_at = COALESCE($3, CURRENT_TIMESTAMP),
+                 is_simulated = COALESCE($4, is_simulated),
+                 error_code = NULL,
+                 error_message = NULL,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $5`,
+            [
+              params.paypalRefundId || null,
+              params.paypalResponse ? JSON.stringify(params.paypalResponse) : null,
+              resolvedCompletedAt,
+              params.isSimulated ?? null,
+              attRow.id,
+            ]
+          );
+
+          // Update order balance atomically in integer cents
+          await client.query(
+            `UPDATE orders
+             SET refunded_amount_cents = $1,
+                 refundable_amount_cents = $2,
+                 status = $3,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $4`,
+            [Number(newRefundedCents), Number(newRefundableCents), nextOrderStatus, orderRow.id]
+          );
+
+          // Consume associated approval
+          if (attRow.approval_id) {
+            await client.query(
+              `UPDATE refund_approvals
+               SET status = 'CONSUMED',
+                   consumed_at = CURRENT_TIMESTAMP
+               WHERE id = $1`,
+              [attRow.approval_id]
+            );
+          }
+
+          // Update case final status
+          await client.query(
+            `UPDATE cases
+             SET status = $1,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $2`,
+            [nextCaseStatus, caseRow.id]
+          );
+        } else {
+          // Non-success outcome: NEVER decrement order balance
+          nextCaseStatus =
+            params.caseStatusOnNonSuccess ||
+            (params.outcome === 'FAILED' ? 'REFUND_FAILED' : 'REFUND_PENDING');
+
+          await client.query(
+            `UPDATE refund_attempts
+             SET status = $1,
+                 paypal_refund_id = COALESCE($2, paypal_refund_id),
+                 paypal_response = COALESCE($3, paypal_response),
+                 error_code = $4,
+                 error_message = $5,
+                 is_simulated = COALESCE($6, is_simulated),
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $7`,
+            [
+              params.outcome,
+              params.paypalRefundId || null,
+              params.paypalResponse ? JSON.stringify(params.paypalResponse) : null,
+              params.errorCode || null,
+              params.errorMessage || null,
+              params.isSimulated ?? null,
+              attRow.id,
+            ]
+          );
+
+          await client.query(
+            `UPDATE cases
+             SET status = $1,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $2`,
+            [nextCaseStatus, caseRow.id]
+          );
+        }
+
+        // Persist audit event inside the same transaction
+        const auditEvent = buildHashChainedEvent(caseRow.id, caseRow.tenant_id);
+        await client.query(
+          `INSERT INTO audit_events (
+            id, tenant_id, case_id, event_type, actor_type, actor_id, actor_name, actor_role,
+            summary, details, previous_hash, current_hash, timestamp
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          ON CONFLICT (id) DO NOTHING`,
+          [
+            auditEvent.id,
+            caseRow.tenant_id,
+            caseRow.id,
+            auditEvent.eventType,
+            auditEvent.actor.type,
+            auditEvent.actor.id || null,
+            auditEvent.actor.name,
+            auditEvent.actor.role || null,
+            auditEvent.summary,
+            auditEvent.details ? JSON.stringify(auditEvent.details) : null,
+            auditEvent.previousHash,
+            auditEvent.currentHash,
+            auditEvent.timestamp,
+          ]
+        );
+
+        // Synchronize in-memory mirrors after DB writes succeed
+        const memOrder = this.data.orders[orderRow.id];
+        if (memOrder) {
+          memOrder.refundedAmount = Number(newRefundedCents) / 100;
+          memOrder.refundableAmount = Number(newRefundableCents) / 100;
+          memOrder.status = nextOrderStatus;
+        }
+
+        const memCase = this.data.cases[caseRow.id];
+        if (memCase) {
+          memCase.status = nextCaseStatus;
+          memCase.updatedAt = new Date().toISOString();
+          memCase.timeline.push(auditEvent);
+
+          if (params.outcome === 'SUCCEEDED' && attRow.approval_id) {
+            if (this.data.refundApprovals[attRow.approval_id]) {
+              this.data.refundApprovals[attRow.approval_id].status = 'CONSUMED';
+              this.data.refundApprovals[attRow.approval_id].consumedAt = resolvedCompletedAt;
+            }
+            if (memCase.activeApproval && memCase.activeApproval.id === attRow.approval_id) {
+              memCase.activeApproval.status = 'CONSUMED';
+              memCase.activeApproval.consumedAt = resolvedCompletedAt;
+            }
+          }
+        }
+
+        let memAttempt = this.data.refundAttempts[attRow.id];
+        if (!memAttempt && memCase) {
+          memAttempt = memCase.refundAttempts.find((a) => a.id === attRow.id)!;
+        }
+        if (memAttempt) {
+          memAttempt.status = params.outcome;
+          if (params.paypalRefundId) memAttempt.paypalRefundId = params.paypalRefundId;
+          if (params.paypalResponse !== undefined) memAttempt.paypalResponse = params.paypalResponse;
+          if (params.isSimulated !== undefined) memAttempt.isSimulated = params.isSimulated;
+          if (params.outcome === 'SUCCEEDED') {
+            memAttempt.completedAt = resolvedCompletedAt;
+            memAttempt.errorCode = undefined;
+            memAttempt.errorMessage = undefined;
+          } else {
+            memAttempt.errorCode = params.errorCode;
+            memAttempt.errorMessage = params.errorMessage;
+          }
+        }
+
+        this.data.auditEvents.push(auditEvent);
+        this.scheduleSave();
+
+        return {
+          alreadyFinalized: false,
+          refundAttempt: memAttempt,
+          order: memOrder,
+          case: memCase,
+        };
+      });
+    }
+
+    // In-memory / JSON atomic fallback when PG is inactive (dev/unit tests)
+    let memAttempt: RefundAttempt | undefined = this.data.refundAttempts[params.attemptId];
+    let memCase: Case | undefined;
+    if (memAttempt) {
+      memCase = this.data.cases[memAttempt.caseId];
+    } else {
+      for (const c of Object.values(this.data.cases)) {
+        const found = c.refundAttempts.find((a) => a.id === params.attemptId);
+        if (found) {
+          memAttempt = found;
+          memCase = c;
+          break;
+        }
+      }
+    }
+
+    if (!memAttempt || !memCase) {
+      throw new Error(`Refund attempt ${params.attemptId} not found during finalization.`);
+    }
+
+    const memOrder = this.data.orders[memCase.orderId];
+    if (!memOrder) {
+      throw new Error(`Order ${memCase.orderId} not found during finalization.`);
+    }
+
+    if (memAttempt.status === 'SUCCEEDED') {
+      return {
+        alreadyFinalized: true,
+        refundAttempt: memAttempt,
+        order: memOrder,
+        case: memCase,
+      };
+    }
+
+    const resolvedCompletedAt = params.completedAt || new Date().toISOString();
+
+    if (params.outcome === 'SUCCEEDED') {
+      const attemptCents = BigInt(memAttempt.amountCents ?? Math.round(memAttempt.amount * 100));
+      const grossCents = BigInt(Math.round(memOrder.grossAmount * 100));
+      const currentRefundedCents = BigInt(Math.round(memOrder.refundedAmount * 100));
+      const currentRefundableCents = BigInt(Math.round(memOrder.refundableAmount * 100));
+
+      if (attemptCents <= 0n || attemptCents > currentRefundableCents) {
+        throw new Error(
+          `Finalization rejected: attempt amount (${Number(attemptCents) / 100}) exceeds remaining refundable balance (${Number(currentRefundableCents) / 100} ${memOrder.currency}).`
+        );
+      }
+
+      const newRefundedCents = currentRefundedCents + attemptCents;
+      const newRefundableCents = grossCents - newRefundedCents;
+
+      memOrder.refundedAmount = Number(newRefundedCents) / 100;
+      memOrder.refundableAmount = Number(newRefundableCents) / 100;
+      memOrder.status = newRefundableCents === 0n ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+
+      memCase.status = newRefundableCents === 0n ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+      memCase.updatedAt = new Date().toISOString();
+
+      memAttempt.status = 'SUCCEEDED';
+      memAttempt.completedAt = resolvedCompletedAt;
+      memAttempt.errorCode = undefined;
+      memAttempt.errorMessage = undefined;
+      if (params.paypalRefundId) memAttempt.paypalRefundId = params.paypalRefundId;
+      if (params.paypalResponse !== undefined) memAttempt.paypalResponse = params.paypalResponse;
+      if (params.isSimulated !== undefined) memAttempt.isSimulated = params.isSimulated;
+
+      const approvalId = memAttempt.approvalId || memCase.activeApproval?.id;
+      if (approvalId && this.data.refundApprovals[approvalId]) {
+        this.data.refundApprovals[approvalId].status = 'CONSUMED';
+        this.data.refundApprovals[approvalId].consumedAt = resolvedCompletedAt;
+      }
+      if (memCase.activeApproval && (memCase.activeApproval.id === approvalId || !memAttempt.approvalId)) {
+        memCase.activeApproval.status = 'CONSUMED';
+        memCase.activeApproval.consumedAt = resolvedCompletedAt;
+      }
+    } else {
+      memAttempt.status = params.outcome;
+      if (params.paypalRefundId) memAttempt.paypalRefundId = params.paypalRefundId;
+      if (params.paypalResponse !== undefined) memAttempt.paypalResponse = params.paypalResponse;
+      if (params.isSimulated !== undefined) memAttempt.isSimulated = params.isSimulated;
+      memAttempt.errorCode = params.errorCode;
+      memAttempt.errorMessage = params.errorMessage;
+      memCase.status =
+        params.caseStatusOnNonSuccess ||
+        (params.outcome === 'FAILED' ? 'REFUND_FAILED' : 'REFUND_PENDING');
+      memCase.updatedAt = new Date().toISOString();
+    }
+
+    const auditEvent = buildHashChainedEvent(memCase.id, memCase.tenantId);
+    memCase.timeline.push(auditEvent);
+    this.data.auditEvents.push(auditEvent);
+    this.data.refundAttempts[memAttempt.id] = memAttempt;
+    this.scheduleSave();
+
+    return {
+      alreadyFinalized: false,
+      refundAttempt: memAttempt,
+      order: memOrder,
+      case: memCase,
+    };
+  }
+
+  public async findRefundAttemptByIdempotencyKey(key: string): Promise<RefundAttempt | null> {
+    const inMem = Object.values(this.data.refundAttempts).find((a) => a.idempotencyKey === key);
+    if (inMem) return inMem;
+
+    if (this.isPostgresConnected && this.pgPool) {
+      const res = await this.pgPool.query('SELECT * FROM refund_attempts WHERE idempotency_key = $1 LIMIT 1', [key]);
+      if (res.rows.length > 0) {
+        const row = res.rows[0];
+        const rawStatus = String(row.status || 'RESERVED').toUpperCase();
+        const attempt: RefundAttempt = {
+          id: row.id,
+          caseId: row.case_id,
+          approvalId: row.approval_id || undefined,
+          approverId: row.approver_id || undefined,
+          executorId: row.executor_id || row.authorized_by_user_id,
+          captureId: row.capture_id,
+          idempotencyKey: row.idempotency_key,
+          requestFingerprint: row.request_fingerprint || undefined,
+          amount: Number(row.amount_cents) / 100,
+          amountCents: Number(row.amount_cents),
+          currency: row.currency,
+          reason: row.reason,
+          status: (rawStatus === 'COMPLETED' ? 'SUCCEEDED' : rawStatus) as RefundAttempt['status'],
+          paypalRefundId: row.paypal_refund_id || undefined,
+          paypalResponse: row.paypal_response ? JSON.parse(JSON.stringify(row.paypal_response)) : undefined,
+          errorCode: row.error_code || undefined,
+          errorMessage: row.error_message || undefined,
+          authorizedBy: {
+            userId: row.authorized_by_user_id,
+            userName: this.data.users[row.authorized_by_user_id]?.name || 'System Operator',
+            userRole: this.data.users[row.authorized_by_user_id]?.role || 'ADMIN',
+          },
+          isSimulated: Boolean(row.is_simulated),
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          completedAt: row.completed_at ? new Date(row.completed_at).toISOString() : undefined,
+        };
+        this.data.refundAttempts[attempt.id] = attempt;
+        return attempt;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Persist or reserve a refund attempt in PostgreSQL if active
    */
   public async reserveRefundAttempt(attempt: RefundAttempt): Promise<void> {
     if (this.isPostgresConnected && this.pgPool) {
       await this.pgPool.query(
         `INSERT INTO refund_attempts (
-          id, case_id, tenant_id, approval_id, capture_id, idempotency_key,
-          amount_cents, currency, reason, status, authorized_by_user_id, is_simulated, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          id, case_id, tenant_id, approval_id, approver_id, executor_id, capture_id,
+          idempotency_key, request_fingerprint, amount_cents, currency, reason, status,
+          authorized_by_user_id, is_simulated, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         ON CONFLICT (id) DO UPDATE SET
           status = EXCLUDED.status,
           amount_cents = EXCLUDED.amount_cents`,
@@ -917,8 +1634,11 @@ export class Database {
           attempt.caseId,
           this.data.cases[attempt.caseId]?.tenantId || 'tenant-apex-101',
           attempt.approvalId || null,
+          attempt.approverId || null,
+          attempt.executorId || attempt.authorizedBy.userId,
           attempt.captureId,
           attempt.idempotencyKey,
+          attempt.requestFingerprint || null,
           attempt.amountCents || Math.round(attempt.amount * 100),
           attempt.currency,
           attempt.reason,
@@ -941,8 +1661,9 @@ export class Database {
           completed_at = $4,
           error_code = $5,
           error_message = $6,
+          is_simulated = COALESCE($7, is_simulated),
           updated_at = CURRENT_TIMESTAMP
-        WHERE id = $7`,
+        WHERE id = $8`,
         [
           attempt.status,
           attempt.paypalRefundId || null,
@@ -950,6 +1671,7 @@ export class Database {
           attempt.completedAt || null,
           attempt.errorCode || null,
           attempt.errorMessage || null,
+          attempt.isSimulated ?? null,
           attempt.id,
         ]
       );
@@ -1009,8 +1731,8 @@ export class Database {
           id, tenant_id, paypal_order_id, paypal_capture_id, order_number, buyer_name,
           buyer_email, currency, gross_amount_cents, shipping_amount_cents,
           refunded_amount_cents, refundable_amount_cents, shipping_carrier, tracking_number,
-          delivery_date, status, transaction_date
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+          tracking_synthetic, delivery_date, status, is_simulated, transaction_date
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
         ON CONFLICT (id) DO UPDATE SET
           refunded_amount_cents = EXCLUDED.refunded_amount_cents,
           refundable_amount_cents = EXCLUDED.refundable_amount_cents,
@@ -1031,8 +1753,10 @@ export class Database {
           Math.round(order.refundableAmount * 100),
           order.shippingCarrier || null,
           order.trackingNumber || null,
+          order.trackingSynthetic ?? true,
           order.deliveryDate || null,
           order.status,
+          order.isSimulated ?? false,
           order.transactionDate,
         ]
       );
@@ -1070,6 +1794,9 @@ export class Database {
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         ON CONFLICT (id) DO UPDATE SET
           status = EXCLUDED.status,
+          issue_type = EXCLUDED.issue_type,
+          requested_resolution = EXCLUDED.requested_resolution,
+          customer_description = EXCLUDED.customer_description,
           merchant_notes = EXCLUDED.merchant_notes,
           assigned_to = EXCLUDED.assigned_to,
           updated_at = CURRENT_TIMESTAMP`,
@@ -1094,6 +1821,394 @@ export class Database {
         ]
       );
     }
+  }
+
+  /**
+   * Persist SHA-256 hash of customer portal access token (never stores plaintext in PG)
+   */
+  public async saveCustomerAccessTokenPg(caseId: string, rawToken: string, expiresAt: string): Promise<void> {
+    if (this.isPostgresConnected && this.pgPool && rawToken) {
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      await this.pgPool.query(
+        `INSERT INTO customer_access_tokens (id, case_id, token_hash, expires_at)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (token_hash) DO UPDATE SET
+           expires_at = EXCLUDED.expires_at`,
+        [`cat-${caseId}-${tokenHash.substring(0, 8)}`, caseId, tokenHash, expiresAt]
+      );
+    }
+  }
+
+  /**
+   * Persist sanitized evidence metadata to PostgreSQL
+   */
+  public async saveEvidenceObjectPg(
+    ev: EvidenceObject,
+    tenantId: string,
+    storagePath: string,
+    uploadedBy?: string
+  ): Promise<void> {
+    if (this.isPostgresConnected && this.pgPool) {
+      await this.pgPool.query(
+        `INSERT INTO evidence_objects (
+          id, case_id, tenant_id, original_filename, storage_path, mime_type, byte_size,
+          width, height, sha256_hash, is_duplicate, scan_status, evidence_type, caption, uploaded_by, uploaded_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        ON CONFLICT (id) DO UPDATE SET
+          is_duplicate = EXCLUDED.is_duplicate,
+          scan_status = EXCLUDED.scan_status`,
+        [
+          ev.id,
+          ev.caseId,
+          tenantId,
+          ev.originalFilename,
+          storagePath,
+          ev.mimeType,
+          ev.byteSize,
+          ev.width || null,
+          ev.height || null,
+          ev.sha256Hash,
+          ev.isDuplicate || false,
+          ev.scanStatus || 'unscanned',
+          ev.evidenceType || 'item_photo',
+          ev.caption || null,
+          uploadedBy || null,
+          ev.uploadedAt,
+        ]
+      );
+    }
+  }
+
+  /**
+   * Persist deterministic policy evaluation in PostgreSQL
+   */
+  public async savePolicyEvaluationPg(
+    caseId: string,
+    evaluation: PolicyEvaluationResult & { id?: string }
+  ): Promise<void> {
+    if (this.isPostgresConnected && this.pgPool) {
+      const evalId = evaluation.id || `peval-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+      await this.pgPool.query(
+        `INSERT INTO policy_evaluations (
+          id, case_id, policy_version, result, eligible_amount_cents,
+          missing_requirements, reason_codes, rules_evaluated, evaluated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (id) DO NOTHING`,
+        [
+          evalId,
+          caseId,
+          evaluation.policy_version,
+          evaluation.result,
+          evaluation.eligible_amount !== null && evaluation.eligible_amount !== undefined
+            ? Math.round(evaluation.eligible_amount * 100)
+            : null,
+          JSON.stringify(evaluation.missing_requirements || []),
+          JSON.stringify(evaluation.reason_codes || []),
+          JSON.stringify(evaluation.rules_evaluated || []),
+          evaluation.evaluated_at || new Date().toISOString(),
+        ]
+      );
+    }
+  }
+
+  /**
+   * Persist Gemini or fallback investigation run in PostgreSQL
+   */
+  public async saveAiRunPg(caseId: string, aiResult: AIInvestigationResult): Promise<void> {
+    if (this.isPostgresConnected && this.pgPool) {
+      const runId = `airun-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+      await this.pgPool.query(
+        `INSERT INTO ai_runs (
+          id, case_id, model_used, analysis_status, customer_claim, reported_facts,
+          evidence_observations, missing_information, inconsistencies, policy_references,
+          limitations, recommended_next_step, explanation, is_fallback, analyzed_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT (id) DO NOTHING`,
+        [
+          runId,
+          caseId,
+          aiResult.model_used,
+          'COMPLETED',
+          aiResult.customer_claim,
+          JSON.stringify(aiResult.reported_facts || []),
+          JSON.stringify(aiResult.evidence_observations || []),
+          JSON.stringify(aiResult.missing_information || []),
+          JSON.stringify(aiResult.inconsistencies || []),
+          JSON.stringify(aiResult.policy_references || []),
+          JSON.stringify(aiResult.limitations || []),
+          aiResult.recommended_next_step,
+          aiResult.explanation,
+          Boolean(aiResult.is_fallback),
+          aiResult.analyzed_at || new Date().toISOString(),
+        ]
+      );
+    }
+  }
+
+  /**
+   * Persist published policy version in PostgreSQL
+   */
+  public async savePolicyPg(tenantId: string, p: RefundPolicy, publishedBy?: string): Promise<void> {
+    if (this.isPostgresConnected && this.pgPool) {
+      const policyId = `pol-${tenantId}-${p.version}`;
+      await this.pgPool.query(
+        `INSERT INTO policies (
+          id, tenant_id, version, return_window_days, require_packaging_photo_for_damage,
+          require_label_photo_for_wrong_item, carrier_delivery_verification_days,
+          max_instant_refund_cents, mandatory_return_threshold_cents,
+          allow_partial_refunds_without_return, max_partial_refund_percentage,
+          flag_duplicate_evidence_hash, description, published_by, published_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT (id) DO UPDATE SET
+          description = EXCLUDED.description`,
+        [
+          policyId,
+          tenantId,
+          p.version,
+          p.returnWindowDays,
+          p.requirePackagingPhotoForDamage,
+          p.requireLabelPhotoForWrongItem,
+          p.carrierDeliveryVerificationDays,
+          Math.round(p.maxInstantRefundAmount * 100),
+          Math.round(p.mandatoryReturnThreshold * 100),
+          p.allowPartialRefundsWithoutReturn,
+          p.maxPartialRefundPercentage,
+          p.flagDuplicateEvidenceHash,
+          p.description,
+          publishedBy || null,
+          p.publishedAt,
+        ]
+      );
+    }
+  }
+
+  /**
+   * Persist team invitation in PostgreSQL
+   */
+  public async saveInvitationPg(inv: MerchantInvitation): Promise<void> {
+    if (this.isPostgresConnected && this.pgPool) {
+      await this.pgPool.query(
+        `INSERT INTO invitations (
+          id, tenant_id, email, name, role, token_hash, invited_by, status, expires_at, created_at, accepted_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT (id) DO UPDATE SET
+          status = EXCLUDED.status,
+          accepted_at = EXCLUDED.accepted_at`,
+        [
+          inv.id,
+          inv.tenantId,
+          inv.email,
+          '',
+          inv.role,
+          inv.tokenHash,
+          inv.invitedByUserId || null,
+          inv.status,
+          inv.expiresAt,
+          inv.createdAt,
+          inv.acceptedAt || null,
+        ]
+      );
+    }
+  }
+
+  /**
+   * Persist verified/unverified PayPal webhook event to PostgreSQL
+   */
+  public async persistWebhookEventPg(params: {
+    eventId: string;
+    eventType: string;
+    resourceType?: string;
+    resourceId?: string;
+    summary?: string;
+    verificationStatus: 'VERIFIED' | 'FAILED' | 'UNVERIFIED';
+    rawPayload: any;
+    processed: boolean;
+  }): Promise<void> {
+    if (params.processed && params.verificationStatus === 'VERIFIED') {
+      this.processedWebhookIds.add(params.eventId);
+    }
+    if (this.isPostgresConnected && this.pgPool) {
+      await this.pgPool.query(
+        `INSERT INTO paypal_webhook_events (
+          id, event_id, event_type, resource_type, resource_id, summary, verification_status, raw_payload, processed
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (event_id) DO UPDATE SET
+          verification_status = EXCLUDED.verification_status,
+          processed = EXCLUDED.processed`,
+        [
+          `whev-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+          params.eventId,
+          params.eventType,
+          params.resourceType || null,
+          params.resourceId || null,
+          params.summary || null,
+          params.verificationStatus,
+          JSON.stringify(params.rawPayload || {}),
+          params.processed,
+        ]
+      );
+    }
+  }
+
+  /**
+   * Persist or update a pending PayPal checkout in memory & PostgreSQL
+   */
+  public async savePendingCheckoutPg(checkout: PendingCheckout): Promise<void> {
+    if (!this.data.pendingCheckouts) {
+      this.data.pendingCheckouts = {};
+    }
+    this.data.pendingCheckouts[checkout.id] = checkout;
+    this.scheduleSave();
+
+    if (this.isPostgresConnected && this.pgPool) {
+      await this.pgPool.query(
+        `INSERT INTO pending_checkouts (
+          id, tenant_id, created_by, paypal_order_id, order_number, product_type, product_sku,
+          product_name, quantity, unit_price_cents, shipping_amount_cents, gross_amount_cents,
+          currency, buyer_name, buyer_email, state_token_hash, status, is_simulated,
+          approve_url, captured_order_id, captured_case_id, failure_reason, expires_at,
+          captured_at, created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+          $19, $20, $21, $22, $23, $24, $25, $26
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          paypal_order_id = EXCLUDED.paypal_order_id,
+          buyer_name = EXCLUDED.buyer_name,
+          buyer_email = EXCLUDED.buyer_email,
+          status = EXCLUDED.status,
+          approve_url = EXCLUDED.approve_url,
+          captured_order_id = EXCLUDED.captured_order_id,
+          captured_case_id = EXCLUDED.captured_case_id,
+          failure_reason = EXCLUDED.failure_reason,
+          captured_at = EXCLUDED.captured_at,
+          updated_at = CURRENT_TIMESTAMP`,
+        [
+          checkout.id,
+          checkout.tenantId,
+          checkout.createdBy,
+          checkout.paypalOrderId,
+          checkout.orderNumber,
+          checkout.productType,
+          checkout.productSku,
+          checkout.productName,
+          checkout.quantity,
+          checkout.unitPriceCents,
+          checkout.shippingAmountCents,
+          checkout.grossAmountCents,
+          checkout.currency,
+          checkout.buyerName || null,
+          checkout.buyerEmail || null,
+          checkout.stateTokenHash,
+          checkout.status,
+          checkout.isSimulated,
+          checkout.approveUrl || null,
+          checkout.capturedOrderId || null,
+          checkout.capturedCaseId || null,
+          checkout.failureReason || null,
+          checkout.expiresAt,
+          checkout.capturedAt || null,
+          checkout.createdAt,
+          checkout.updatedAt,
+        ]
+      );
+    }
+  }
+
+  public async getPendingCheckoutByPayPalOrderId(paypalOrderId: string): Promise<PendingCheckout | null> {
+    if (!this.data.pendingCheckouts) this.data.pendingCheckouts = {};
+    const inMem = Object.values(this.data.pendingCheckouts).find((c) => c.paypalOrderId === paypalOrderId);
+    if (inMem) return inMem;
+
+    if (this.isPostgresConnected && this.pgPool) {
+      const res = await this.pgPool.query('SELECT * FROM pending_checkouts WHERE paypal_order_id = $1 LIMIT 1', [paypalOrderId]);
+      if (res.rows.length > 0) {
+        const row = res.rows[0];
+        const pc: PendingCheckout = {
+          id: row.id,
+          tenantId: row.tenant_id,
+          createdBy: row.created_by,
+          paypalOrderId: row.paypal_order_id,
+          orderNumber: row.order_number,
+          productType: row.product_type,
+          productSku: row.product_sku,
+          productName: row.product_name,
+          quantity: Number(row.quantity),
+          unitPrice: Number(row.unit_price_cents) / 100,
+          unitPriceCents: Number(row.unit_price_cents),
+          shippingAmount: Number(row.shipping_amount_cents) / 100,
+          shippingAmountCents: Number(row.shipping_amount_cents),
+          grossAmount: Number(row.gross_amount_cents) / 100,
+          grossAmountCents: Number(row.gross_amount_cents),
+          currency: row.currency,
+          buyerName: row.buyer_name || undefined,
+          buyerEmail: row.buyer_email || undefined,
+          stateTokenHash: row.state_token_hash,
+          status: row.status,
+          isSimulated: Boolean(row.is_simulated),
+          approveUrl: row.approve_url || undefined,
+          capturedOrderId: row.captured_order_id || undefined,
+          capturedCaseId: row.captured_case_id || undefined,
+          failureReason: row.failure_reason || undefined,
+          expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : new Date().toISOString(),
+          capturedAt: row.captured_at ? new Date(row.captured_at).toISOString() : undefined,
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+        };
+        this.data.pendingCheckouts[pc.id] = pc;
+        return pc;
+      }
+    }
+    return null;
+  }
+
+  public async getPendingCheckoutByStateToken(rawStateToken: string): Promise<PendingCheckout | null> {
+    if (!rawStateToken || typeof rawStateToken !== 'string') return null;
+    const tokenHash = crypto.createHash('sha256').update(rawStateToken.trim()).digest('hex');
+    if (!this.data.pendingCheckouts) this.data.pendingCheckouts = {};
+    const inMem = Object.values(this.data.pendingCheckouts).find((c) => c.stateTokenHash === tokenHash);
+    if (inMem) return inMem;
+
+    if (this.isPostgresConnected && this.pgPool) {
+      const res = await this.pgPool.query('SELECT * FROM pending_checkouts WHERE state_token_hash = $1 LIMIT 1', [tokenHash]);
+      if (res.rows.length > 0) {
+        const row = res.rows[0];
+        const pc: PendingCheckout = {
+          id: row.id,
+          tenantId: row.tenant_id,
+          createdBy: row.created_by,
+          paypalOrderId: row.paypal_order_id,
+          orderNumber: row.order_number,
+          productType: row.product_type,
+          productSku: row.product_sku,
+          productName: row.product_name,
+          quantity: Number(row.quantity),
+          unitPrice: Number(row.unit_price_cents) / 100,
+          unitPriceCents: Number(row.unit_price_cents),
+          shippingAmount: Number(row.shipping_amount_cents) / 100,
+          shippingAmountCents: Number(row.shipping_amount_cents),
+          grossAmount: Number(row.gross_amount_cents) / 100,
+          grossAmountCents: Number(row.gross_amount_cents),
+          currency: row.currency,
+          buyerName: row.buyer_name || undefined,
+          buyerEmail: row.buyer_email || undefined,
+          stateTokenHash: row.state_token_hash,
+          status: row.status,
+          isSimulated: Boolean(row.is_simulated),
+          approveUrl: row.approve_url || undefined,
+          capturedOrderId: row.captured_order_id || undefined,
+          capturedCaseId: row.captured_case_id || undefined,
+          failureReason: row.failure_reason || undefined,
+          expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : new Date().toISOString(),
+          capturedAt: row.captured_at ? new Date(row.captured_at).toISOString() : undefined,
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+        };
+        this.data.pendingCheckouts[pc.id] = pc;
+        return pc;
+      }
+    }
+    return null;
   }
 
   /**
@@ -1137,23 +2252,29 @@ export class Database {
     if (this.isPostgresConnected && this.pgPool) {
       await this.pgPool.query(
         `INSERT INTO refund_approvals (
-          id, case_id, tenant_id, authorized_by, approved_amount_cents, currency,
-          capture_id, case_version, policy_version, notes, status, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          id, case_id, tenant_id, order_id, authorized_by, approved_amount_cents, currency,
+          capture_id, case_version, policy_version, policy_evaluation_id, notes, status,
+          expires_at, consumed_at, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         ON CONFLICT (id) DO UPDATE SET
-          status = EXCLUDED.status`,
+          status = EXCLUDED.status,
+          consumed_at = EXCLUDED.consumed_at`,
         [
           a.id,
           a.caseId,
           a.tenantId,
+          a.orderId || null,
           a.authorizedBy,
-          Math.round(a.approvedAmount * 100),
+          a.approvedAmountCents || Math.round(a.approvedAmount * 100),
           a.currency,
           a.captureId,
           a.caseVersion || 'v1',
           a.policyVersion,
+          a.policyEvaluationId || null,
           a.notes || null,
           a.status,
+          a.expiresAt || null,
+          a.consumedAt || null,
           a.createdAt,
         ]
       );
@@ -1203,9 +2324,16 @@ export class Database {
     this.processedWebhookIds.add(eventId);
   }
 
+  get pendingCheckouts() {
+    if (!this.data.pendingCheckouts) {
+      this.data.pendingCheckouts = {};
+    }
+    return this.data.pendingCheckouts;
+  }
+
   private getDefaultSchema(): DatabaseSchema {
     return {
-      version: 1,
+      version: 2,
       tenants: {},
       users: {},
       sessions: {},
@@ -1214,6 +2342,7 @@ export class Database {
       policies: {},
       refundAttempts: {},
       refundApprovals: {},
+      pendingCheckouts: {},
       auditEvents: [],
       outbox: [],
       invitations: {},
@@ -1221,20 +2350,72 @@ export class Database {
   }
 
   /**
-   * Atomic file persistence with write-to-temp and rename to prevent corruption
+   * Synchronous atomic file persistence with unique temporary filename and rename
    */
   public saveSync() {
-    const tempFile = `${DB_FILE}.${Date.now()}.tmp`;
+    const dataDir = resolveDataDir();
+    const dbFile = resolveDbFile();
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+    const tempFile = `${dbFile}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     const serialized = JSON.stringify(this.data, null, 2);
-    fs.writeFileSync(tempFile, serialized, 'utf-8');
-    fs.renameSync(tempFile, DB_FILE);
+    try {
+      fs.writeFileSync(tempFile, serialized, 'utf-8');
+      fs.renameSync(tempFile, dbFile);
+    } catch (err: any) {
+      try {
+        if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+      } catch (_) {}
+      console.error('[Database] CRITICAL: Atomic file persistence failed:', err.message);
+      throw err;
+    }
+  }
+
+  private async saveAsyncSerialized(): Promise<void> {
+    const runWrite = async () => {
+      const dataDir = resolveDataDir();
+      const dbFile = resolveDbFile();
+      if (!fs.existsSync(dataDir)) {
+        await fs.promises.mkdir(dataDir, { recursive: true });
+      }
+      const tempFile = `${dbFile}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+      const serialized = JSON.stringify(this.data, null, 2);
+      try {
+        await fs.promises.writeFile(tempFile, serialized, 'utf-8');
+        await fs.promises.rename(tempFile, dbFile);
+      } catch (err: any) {
+        try {
+          if (fs.existsSync(tempFile)) await fs.promises.unlink(tempFile);
+        } catch (_) {}
+        console.error('[Database] CRITICAL: Async atomic JSON write failed:', err.message);
+        throw err;
+      }
+    };
+
+    const next = this.writePromise.then(runWrite, runWrite);
+    this.writePromise = next.catch(() => {});
+    return next;
   }
 
   public scheduleSave() {
     if (this.saveDebounceTimer) clearTimeout(this.saveDebounceTimer);
     this.saveDebounceTimer = setTimeout(() => {
-      this.saveSync();
+      this.saveAsyncSerialized().catch((err) => {
+        console.error('[Database] Scheduled JSON write failed:', err.message);
+      });
     }, 100);
+  }
+
+  /**
+   * Flush all pending debounced/in-flight JSON writes cleanly before shutdown or response assertions
+   */
+  public async flush(): Promise<void> {
+    if (this.saveDebounceTimer) {
+      clearTimeout(this.saveDebounceTimer);
+      this.saveDebounceTimer = undefined;
+    }
+    await this.saveAsyncSerialized();
   }
 
   // -------------------------------------------------------------

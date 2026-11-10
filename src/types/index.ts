@@ -71,8 +71,10 @@ export interface Order {
   items: OrderItem[];
   shippingCarrier?: string;
   trackingNumber?: string;
+  trackingSynthetic?: boolean;
   deliveryDate?: string;
   status: 'COMPLETED' | 'PARTIALLY_REFUNDED' | 'REFUNDED';
+  isSimulated?: boolean;
 }
 
 export interface EvidenceObject {
@@ -215,6 +217,9 @@ export interface CaseEvent {
     | 'REFUND_AUTHORIZED'
     | 'REFUND_EXECUTED'
     | 'REFUND_RECONCILED'
+    | 'REFUND_RECONCILE_PENDING'
+    | 'REFUND_RECONCILIATION_REQUIRED'
+    | 'REFUND_RECONCILIATION_BLOCKED'
     | 'REFUND_FAILED'
     | 'STATUS_CHANGED'
     | 'NOTE_ADDED'
@@ -300,4 +305,38 @@ export interface MerchantInvitation {
   expiresAt: string;
   createdAt: string;
   acceptedAt?: string;
+}
+
+export type PendingCheckoutStatus = 'PENDING' | 'CAPTURED' | 'CANCELLED' | 'EXPIRED' | 'FAILED';
+
+export interface PendingCheckout {
+  id: string;
+  tenantId: string;
+  createdBy: string;
+  paypalOrderId: string;
+  orderNumber: string;
+  productType: 'headphones' | 'shoes' | 'tracker';
+  productSku: string;
+  productName: string;
+  quantity: number;
+  unitPrice: number;
+  unitPriceCents: number;
+  shippingAmount: number;
+  shippingAmountCents: number;
+  grossAmount: number;
+  grossAmountCents: number;
+  currency: string;
+  buyerName?: string;
+  buyerEmail?: string;
+  stateTokenHash: string;
+  status: PendingCheckoutStatus;
+  isSimulated: boolean;
+  approveUrl?: string;
+  capturedOrderId?: string;
+  capturedCaseId?: string;
+  failureReason?: string;
+  expiresAt: string;
+  capturedAt?: string;
+  createdAt: string;
+  updatedAt: string;
 }

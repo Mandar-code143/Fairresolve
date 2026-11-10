@@ -155,8 +155,15 @@ export class ApprovalService {
     c.updatedAt = new Date().toISOString();
 
     if (db.isPostgresActive()) {
-      db.saveRefundApprovalPg(approval).catch(() => {});
-      db.saveCasePg(c).catch(() => {});
+      db.savePolicyEvaluationPg(c.id, policyEval).catch((err) =>
+        console.warn('[ApprovalService] PG savePolicyEvaluationPg error:', err.message)
+      );
+      db.saveRefundApprovalPg(approval).catch((err) =>
+        console.warn('[ApprovalService] PG saveRefundApprovalPg error:', err.message)
+      );
+      db.saveCasePg(c).catch((err) =>
+        console.warn('[ApprovalService] PG saveCasePg error:', err.message)
+      );
     }
 
     const approveEvent: CaseEvent = {
@@ -198,10 +205,20 @@ export class ApprovalService {
       if (db.refundApprovals[c.activeApproval.id]) {
         db.refundApprovals[c.activeApproval.id].status = 'REVOKED';
       }
+      if (db.isPostgresActive()) {
+        db.saveRefundApprovalPg(c.activeApproval).catch((err) =>
+          console.warn('[ApprovalService] PG saveRefundApprovalPg (REVOKED) error:', err.message)
+        );
+      }
     }
 
     c.status = 'REJECTED';
     c.updatedAt = new Date().toISOString();
+    if (db.isPostgresActive()) {
+      db.saveCasePg(c).catch((err) =>
+        console.warn('[ApprovalService] PG saveCasePg (REJECTED) error:', err.message)
+      );
+    }
 
     const revokeEvent: CaseEvent = {
       id: `ev-log-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
@@ -264,6 +281,11 @@ export class ApprovalService {
         db.refundApprovals[approval.id].status = 'EXPIRED';
       }
       db.scheduleSave();
+      if (db.isPostgresActive()) {
+        db.saveRefundApprovalPg(approval).catch((err) =>
+          console.warn('[ApprovalService] PG saveRefundApprovalPg (EXPIRED) error:', err.message)
+        );
+      }
       return {
         valid: false,
         statusCode: 400,
