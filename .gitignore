@@ -8,4 +8,5 @@ coverage/
 !.env.example
 private_uploads/
 data/
+temp_*/
 *.tmp

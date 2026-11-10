@@ -41,12 +41,13 @@ import { geminiService } from './src/server/geminiService';
 import { policyEngine, toCents, toDollars } from './src/server/policyEngine';
 import { evidenceProcessor } from './src/server/evidenceProcessor';
 import { backgroundWorker } from './src/server/worker';
-import { CaseEvent, MerchantInvitation, RefundApproval, RefundAttempt, UserRole } from './src/types';
+import { CaseEvent, MerchantInvitation, PendingCheckout, RefundApproval, RefundAttempt, UserRole } from './src/types';
 import config from './src/server/config';
 
 dotenv.config();
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : config.PORT;
 const IS_PRODUCTION = process.env.NODE_ENV === 'production' || config.NODE_ENV === 'production';
 const DEMO_MODE = process.env.DEMO_MODE !== 'false' && config.DEMO_MODE;
@@ -63,7 +64,7 @@ app.use(
   })
 );
 
-app.use(cookieParser());
+app.use(cookieParser(config.SESSION_SECRET));
 
 // Explicit CORS Origin Allowlist - rejects arbitrary unknown origins
 const allowedOrigins = config.ALLOWED_ORIGINS;
@@ -117,18 +118,76 @@ const uploadLimiter = rateLimit({
 // HEALTH ENDPOINTS
 // -------------------------------------------------------------
 app.get('/health/live', (_req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
+  res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
 });
 
-app.get('/health/ready', (_req, res) => {
-  const auditVerification = db.verifyAuditChainIntegrity();
-  const isPostgresRequired = config.NODE_ENV === 'production';
-  const isPostgresReady = db.isPostgresActive();
+app.get('/health/ready', async (_req, res) => {
+  const failures: string[] = [];
 
-  if (isPostgresRequired && !isPostgresReady) {
+  if (process.env.NODE_ENV !== 'test') {
+    try {
+      await db.waitForReady();
+    } catch (err: any) {
+      failures.push(`Database readiness failed: ${err.message}`);
+    }
+  }
+
+  const isPostgresRequired = IS_PRODUCTION || (process.env.NODE_ENV !== 'test' && Boolean(config.DATABASE_URL));
+  const isPostgresReady = db.isPostgresActive();
+  let postgresPingOk = false;
+  let migrationVersion = 0;
+
+  if (isPostgresReady) {
+    postgresPingOk = await db.pingPostgres();
+    if (!postgresPingOk) {
+      failures.push('PostgreSQL health check query (SELECT 1) failed');
+    } else if (db.getPgPool()) {
+      try {
+        const migRes = await db.getPgPool()!.query('SELECT MAX(version) AS max_ver FROM schema_migrations');
+        migrationVersion = Number(migRes.rows[0]?.max_ver || 0);
+        if (migrationVersion < 4) {
+          failures.push(`PostgreSQL schema migration incomplete (version=${migrationVersion}, expected>=4)`);
+        }
+      } catch (err: any) {
+        failures.push(`Failed to inspect schema_migrations: ${err.message}`);
+      }
+    }
+  } else if (isPostgresRequired) {
+    failures.push('PostgreSQL connection is required and not currently active');
+  }
+
+  const storageWritable = db.verifyStorageWritable();
+  if (!storageWritable) {
+    failures.push(`Storage directory is not writable (${db.getDataDir()})`);
+  }
+
+  const initialDataLoaded = db.isInitialDataLoaded();
+  if (!initialDataLoaded) {
+    failures.push('Initial tenant/seed state has not finished loading');
+  }
+
+  const workerRequired =
+    process.env.NODE_ENV !== 'test' &&
+    process.env.SERVICE_TYPE !== 'worker' &&
+    config.RUN_IN_PROCESS_WORKER;
+  const workerActive = backgroundWorker.isActive();
+  if (workerRequired && !workerActive) {
+    failures.push('In-process background outbox worker is not active');
+  }
+
+  const auditVerification = db.verifyAuditChainIntegrity();
+  const gatewayStatus = db.getGatewayStatus();
+
+  if (failures.length > 0) {
     return res.status(503).json({
       status: 'not_ready',
-      error: 'PostgreSQL connection is required and not currently active in production',
+      errors: failures,
+      postgresActive: isPostgresReady,
+      postgresPingOk,
+      migrationVersion,
+      storageWritable,
+      initialDataLoaded,
+      workerActive,
       timestamp: new Date().toISOString(),
     });
   }
@@ -137,8 +196,14 @@ app.get('/health/ready', (_req, res) => {
     status: 'ready',
     timestamp: new Date().toISOString(),
     postgresActive: isPostgresReady,
-    durableDatabaseLoaded: Object.keys(db.cases).length > 0,
-    paypalConfigured: paypalGateway.isConfigured(),
+    postgresPingOk,
+    migrationVersion,
+    storageWritable,
+    storageDir: db.getDataDir(),
+    durableDatabaseLoaded: initialDataLoaded,
+    workerActive,
+    paypalConfigured: gatewayStatus.isConfigured,
+    paypalVerificationStatus: gatewayStatus.verificationStatus,
     aiAvailable: geminiService.isAvailable(),
     auditChainIntact: auditVerification.isValid,
     auditCheckedCount: auditVerification.checkedCount,
@@ -166,7 +231,7 @@ app.get('/api/v1/auth/demo-accounts', (_req, res) => {
 });
 
 // Demo Login: Issues a real session token and HttpOnly cookie for an explicitly requested account
-app.post('/api/v1/auth/demo-login', authLimiter, (req, res) => {
+app.post('/api/v1/auth/demo-login', authLimiter, async (req, res) => {
   if (IS_PRODUCTION && process.env.DEMO_MODE !== 'true') {
     return res.status(403).json({ error: 'Demo login is strictly disabled in production.' });
   }
@@ -182,6 +247,9 @@ app.post('/api/v1/auth/demo-login', authLimiter, (req, res) => {
   }
 
   const { session, token } = authService.createSession(userAccount.id, userAccount.tenantId, req);
+  if (db.isPostgresActive()) {
+    await db.saveSessionPg(session);
+  }
   authService.setAuthCookie(res, token);
   const tenant = db.tenants[userAccount.tenantId];
 
@@ -201,7 +269,7 @@ app.post('/api/v1/auth/demo-login', authLimiter, (req, res) => {
 });
 
 // Regular Login: Verifies email and password using timing-safe scrypt
-app.post('/api/v1/auth/login', authLimiter, (req, res) => {
+app.post('/api/v1/auth/login', authLimiter, async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password are required' });
@@ -221,6 +289,9 @@ app.post('/api/v1/auth/login', authLimiter, (req, res) => {
   }
 
   const { session, token } = authService.createSession(userAccount.id, userAccount.tenantId, req);
+  if (db.isPostgresActive()) {
+    await db.saveSessionPg(session);
+  }
   authService.setAuthCookie(res, token);
   const tenant = db.tenants[userAccount.tenantId];
 
@@ -306,6 +377,10 @@ app.post('/api/v1/auth/register', authLimiter, async (req, res) => {
   db.scheduleSave();
 
   const { session, token } = authService.createSession(userId, tenantId, req);
+  if (db.isPostgresActive()) {
+    await db.savePolicyPg(tenantId, db.policies[tenantId][0]);
+    await db.saveSessionPg(session);
+  }
   authService.setAuthCookie(res, token);
 
   res.json({
@@ -369,7 +444,7 @@ app.post(
   '/api/v1/merchant/team/invite',
   requireAuth,
   requireRoles(['OWNER', 'ADMIN']),
-  (req: AuthenticatedRequest, res: Response) => {
+  async (req: AuthenticatedRequest, res: Response) => {
     const { name, email, role } = req.body;
     if (!email || !role) {
       return res.status(400).json({ error: 'Email and role are required' });
@@ -406,6 +481,9 @@ app.post(
     };
 
     db.invitations[invitation.id] = invitation;
+    if (db.isPostgresActive()) {
+      await db.saveInvitationPg(invitation);
+    }
     db.scheduleSave();
 
     const inviteLink = `/accept-invite?token=${rawInviteToken}`;
@@ -424,7 +502,7 @@ app.post(
 );
 
 // Verify an invitation token before display
-app.get('/api/v1/merchant/invitations/verify', (req, res) => {
+app.get('/api/v1/merchant/invitations/verify', async (req, res) => {
   const rawToken = req.query.token as string;
   if (!rawToken) {
     return res.status(400).json({ error: 'Token is required' });
@@ -441,6 +519,9 @@ app.get('/api/v1/merchant/invitations/verify', (req, res) => {
 
   if (new Date(inv.expiresAt).getTime() < Date.now()) {
     inv.status = 'EXPIRED';
+    if (db.isPostgresActive()) {
+      await db.saveInvitationPg(inv);
+    }
     db.scheduleSave();
     return res.status(410).json({ error: 'This invitation has expired. Please request a new invite.' });
   }
@@ -456,7 +537,7 @@ app.get('/api/v1/merchant/invitations/verify', (req, res) => {
 });
 
 // Accept invitation & establish password
-app.post('/api/v1/merchant/invitations/accept', authLimiter, (req, res) => {
+app.post('/api/v1/merchant/invitations/accept', authLimiter, async (req, res) => {
   const { token, name, password } = req.body;
   if (!token || !name || !password) {
     return res.status(400).json({ error: 'Token, name, and password are required' });
@@ -478,6 +559,9 @@ app.post('/api/v1/merchant/invitations/accept', authLimiter, (req, res) => {
 
   if (new Date(inv.expiresAt).getTime() < Date.now()) {
     inv.status = 'EXPIRED';
+    if (db.isPostgresActive()) {
+      await db.saveInvitationPg(inv);
+    }
     db.scheduleSave();
     return res.status(410).json({ error: 'This invitation has expired.' });
   }
@@ -500,9 +584,15 @@ app.post('/api/v1/merchant/invitations/accept', authLimiter, (req, res) => {
   db.users[userId] = newUser;
   inv.status = 'ACCEPTED';
   inv.acceptedAt = new Date().toISOString();
-  db.scheduleSave();
 
   const { session, token: sessionToken } = authService.createSession(userId, inv.tenantId, req);
+  if (db.isPostgresActive()) {
+    await db.saveUserPg(newUser);
+    await db.saveInvitationPg(inv);
+    await db.saveSessionPg(session);
+  }
+  db.scheduleSave();
+
   authService.setAuthCookie(res, sessionToken);
 
   res.json({
@@ -518,12 +608,15 @@ app.delete(
   '/api/v1/merchant/team/invitations/:id',
   requireAuth,
   requireRoles(['OWNER', 'ADMIN']),
-  (req: AuthenticatedRequest, res: Response) => {
+  async (req: AuthenticatedRequest, res: Response) => {
     const inv = db.invitations[req.params.id];
     if (!inv || inv.tenantId !== req.tenantId) {
       return res.status(404).json({ error: 'Invitation not found' });
     }
     inv.status = 'REVOKED';
+    if (db.isPostgresActive()) {
+      await db.saveInvitationPg(inv);
+    }
     db.scheduleSave();
     res.json({ success: true, message: 'Invitation revoked' });
   }
@@ -657,11 +750,19 @@ app.post(
       };
       c.timeline.push(event);
       db.appendAuditEvent(event);
+      if (db.isPostgresActive()) {
+        await db.saveAiRunPg(c.id, aiResult);
+        await db.savePolicyEvaluationPg(c.id, policyResult);
+        await db.saveCasePg(c);
+      }
       db.scheduleSave();
 
       res.json({ success: true, case: c });
     } catch (err: any) {
       c.status = 'READY_FOR_REVIEW';
+      if (db.isPostgresActive()) {
+        await db.saveCasePg(c).catch(() => {});
+      }
       db.scheduleSave();
       res.status(500).json({ error: err.message || 'AI analysis failed' });
     }
@@ -705,6 +806,9 @@ app.post(
       try {
         const updatedCase = approvalService.revokeApproval(c.id, c.tenantId, user, reason);
         if (notes) updatedCase.merchantNotes = notes;
+        if (db.isPostgresActive()) {
+          await db.saveCasePg(updatedCase);
+        }
         return res.json({ success: true, case: updatedCase });
       } catch (err: any) {
         return res.status(err.statusCode || 400).json({ error: err.message || 'Failed to revoke case' });
@@ -731,6 +835,9 @@ app.post(
     };
     c.timeline.push(event);
     db.appendAuditEvent(event);
+    if (db.isPostgresActive()) {
+      await db.saveCasePg(c);
+    }
     db.scheduleSave();
 
     res.json({ success: true, case: c });
@@ -770,7 +877,7 @@ app.post(
   '/api/v1/cases/:id/assign',
   requireAuth,
   requireRoles(['OWNER', 'ADMIN', 'REVIEWER']),
-  (req: AuthenticatedRequest, res: Response) => {
+  async (req: AuthenticatedRequest, res: Response) => {
     const { assignedTo } = req.body;
     const c = db.cases[req.params.id];
     if (!c || c.tenantId !== req.tenantId) {
@@ -783,6 +890,9 @@ app.post(
       c.assignedAt = undefined;
       c.assignedBy = undefined;
       c.updatedAt = new Date().toISOString();
+      if (db.isPostgresActive()) {
+        await db.saveCasePg(c);
+      }
       db.scheduleSave();
       return res.json({ success: true, case: c, message: 'Case unassigned' });
     }
@@ -815,6 +925,9 @@ app.post(
     };
     c.timeline.push(assignEvent);
     db.appendAuditEvent(assignEvent);
+    if (db.isPostgresActive()) {
+      await db.saveCasePg(c);
+    }
     db.scheduleSave();
 
     res.json({ success: true, case: c });
@@ -843,11 +956,17 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
   // 2. Check existing attempt with same idempotency key (deduplication & mismatch detection)
   const existingAttempt =
     c.refundAttempts.find((a) => a.idempotencyKey === key) ||
-    Object.values(db.refundAttempts).find((a) => a.idempotencyKey === key);
+    Object.values(db.refundAttempts).find((a) => a.idempotencyKey === key) ||
+    (await db.findRefundAttemptByIdempotencyKey(key));
 
   if (existingAttempt) {
+    if (amount === undefined && !c.activeApproval) {
+      return res.status(400).json({
+        error: 'Refund execution requires an explicit active approval record. Cannot infer amount from order balance.',
+      });
+    }
     const candidateAmountDollars =
-      amount !== undefined ? parseFloat(amount) : (c.activeApproval?.approvedAmount ?? order.refundableAmount);
+      amount !== undefined ? parseFloat(amount) : c.activeApproval!.approvedAmount;
     const candidateAmountCents = toCents(candidateAmountDollars);
     const candidatePayload = JSON.stringify({
       caseId: c.id,
@@ -871,10 +990,13 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
       existingAttempt.status === 'PENDING' ||
       existingAttempt.status === 'SUBMITTED'
     ) {
-      return res.json({
-        success: true,
+      const isSettled = existingAttempt.status === 'SUCCEEDED';
+      return res.status(isSettled ? 200 : 202).json({
+        success: isSettled,
+        status: existingAttempt.status,
         refundAttempt: existingAttempt,
         case: c,
+        order,
         isDuplicateSubmission: true,
       });
     }
@@ -961,38 +1083,63 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
     });
 
     if (result.status === 'COMPLETED') {
-      refundRecord.status = 'SUCCEEDED';
-      refundRecord.paypalRefundId = result.refundId;
-      refundRecord.paypalResponse = result.rawResponse;
-      refundRecord.completedAt = result.createTime;
-      refundRecord.isSimulated = result.isSimulated;
-
-      approval.status = 'CONSUMED';
-      approval.consumedAt = new Date().toISOString();
-      if (db.refundApprovals[approval.id]) {
-        db.refundApprovals[approval.id].status = 'CONSUMED';
-        db.refundApprovals[approval.id].consumedAt = approval.consumedAt;
+      const returnedCents = toCents(result.amount);
+      if (
+        !result.refundId ||
+        !Number.isFinite(returnedCents) ||
+        returnedCents !== execAmountCents ||
+        result.currency.toUpperCase() !== order.currency.toUpperCase()
+      ) {
+        const finalizedMismatch = await db.finalizeRefundTransaction({
+          attemptId: refundRecord.id,
+          outcome: 'RECONCILIATION_REQUIRED',
+          paypalRefundId: result.refundId,
+          paypalResponse: result.rawResponse,
+          errorMessage: `PayPal refund response failed verification checks (returned ${result.amount} ${result.currency}).`,
+          isSimulated: result.isSimulated,
+          caseStatusOnNonSuccess: 'REFUND_UNKNOWN',
+          actor: { type: 'PAYPAL_GATEWAY', name: 'PayPal Sandbox Gateway' },
+          summary: `PayPal refund response flagged for reconciliation due to payload/amount mismatch.`,
+          eventType: 'REFUND_RECONCILIATION_REQUIRED',
+          eventDetails: {
+            refundId: result.refundId,
+            expectedCents: execAmountCents,
+            returnedCents,
+            currency: result.currency,
+          },
+        });
+        await backgroundWorker.enqueue({
+          eventType: 'RECONCILE_PENDING_REFUND',
+          tenantId: c.tenantId,
+          payload: {
+            caseId: c.id,
+            refundAttemptId: refundRecord.id,
+            captureId: order.paypalCaptureId,
+            idempotencyKey: key,
+          },
+          runAfterSeconds: 30,
+        });
+        return res.status(202).json({
+          success: false,
+          status: 'RECONCILIATION_REQUIRED',
+          message: 'PayPal refund response failed exact amount/currency match. Enqueued for reconciliation.',
+          refundAttempt: finalizedMismatch.refundAttempt,
+          case: finalizedMismatch.case || c,
+          order: finalizedMismatch.order || order,
+        });
       }
 
-      // Balance arithmetic in integer minor units
-      const newRefundedCents = toCents(order.refundedAmount) + execAmountCents;
-      const grossCents = toCents(order.grossAmount);
-      const newRefundableCents = Math.max(0, grossCents - newRefundedCents);
-
-      order.refundedAmount = toDollars(newRefundedCents);
-      order.refundableAmount = toDollars(newRefundableCents);
-      order.status = newRefundableCents === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
-
-      c.status = newRefundableCents === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
-      c.updatedAt = new Date().toISOString();
-
-      const timelineEvent: CaseEvent = {
-        id: `ev-log-${Date.now()}`,
-        caseId: c.id,
-        eventType: 'REFUND_EXECUTED',
+      const finalized = await db.finalizeRefundTransaction({
+        attemptId: refundRecord.id,
+        outcome: 'SUCCEEDED',
+        paypalRefundId: result.refundId,
+        paypalResponse: result.rawResponse,
+        completedAt: result.createTime,
+        isSimulated: result.isSimulated,
         actor: { type: 'PAYPAL_GATEWAY', name: 'PayPal Sandbox Gateway' },
         summary: `PayPal Sandbox refund of $${execAmountDollars.toFixed(2)} ${order.currency} completed. Refund ID: ${result.refundId} ${result.isSimulated ? '(Simulated Mode)' : '(Live Sandbox)'}`,
-        details: {
+        eventType: 'REFUND_EXECUTED',
+        eventDetails: {
           refundId: result.refundId,
           amount: execAmountDollars,
           currency: order.currency,
@@ -1001,65 +1148,27 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
           executorId: user.id,
           isSimulated: result.isSimulated,
         },
-        timestamp: new Date().toISOString(),
-      };
-      c.timeline.push(timelineEvent);
-      db.appendAuditEvent(timelineEvent);
-      await db.updateRefundAttemptState(refundRecord);
-    } else if (result.status === 'PENDING') {
-      refundRecord.status = 'PENDING';
-      refundRecord.paypalRefundId = result.refundId;
-      refundRecord.paypalResponse = result.rawResponse;
-      refundRecord.isSimulated = result.isSimulated;
-      c.status = 'REFUND_PENDING';
-      c.updatedAt = new Date().toISOString();
+      });
 
-      const pendingEvent: CaseEvent = {
-        id: `ev-log-${Date.now()}`,
-        caseId: c.id,
-        eventType: 'REFUND_EXECUTED',
+      return res.json({
+        success: true,
+        refundAttempt: finalized.refundAttempt,
+        case: finalized.case || c,
+        order: finalized.order || order,
+      });
+    } else if (result.status === 'PENDING' || result.status === 'UNKNOWN') {
+      const finalizedPending = await db.finalizeRefundTransaction({
+        attemptId: refundRecord.id,
+        outcome: 'PENDING',
+        paypalRefundId: result.refundId,
+        paypalResponse: result.rawResponse,
+        isSimulated: result.isSimulated,
+        caseStatusOnNonSuccess: 'REFUND_PENDING',
         actor: { type: 'PAYPAL_GATEWAY', name: 'PayPal Sandbox Gateway' },
-        summary: `PayPal refund initiated and currently PENDING clearance. Refund ID: ${result.refundId}`,
-        details: { refundId: result.refundId, status: 'PENDING' },
-        timestamp: new Date().toISOString(),
-      };
-      c.timeline.push(pendingEvent);
-      db.appendAuditEvent(pendingEvent);
-      await db.updateRefundAttemptState(refundRecord);
-    } else {
-      refundRecord.status = 'FAILED';
-      c.status = 'REFUND_FAILED';
-      c.updatedAt = new Date().toISOString();
-      await db.updateRefundAttemptState(refundRecord);
-    }
-
-    db.scheduleSave();
-    res.json({ success: true, refundAttempt: refundRecord, case: c, order });
-  } catch (err: any) {
-    const isTimeoutOrNetworkError =
-      err.name === 'AbortError' ||
-      err.code === 'ECONNRESET' ||
-      err.code === 'ETIMEDOUT' ||
-      err.message?.toLowerCase().includes('timeout') ||
-      err.message?.toLowerCase().includes('network') ||
-      err.message?.toLowerCase().includes('fetch failed');
-
-    if (isTimeoutOrNetworkError) {
-      refundRecord.status = 'RECONCILIATION_REQUIRED';
-      refundRecord.errorMessage = `Network or gateway timeout: ${err.message}. Enqueued for background reconciliation.`;
-      c.status = 'REFUND_PENDING';
-
-      const reconEvent: CaseEvent = {
-        id: `ev-log-${Date.now()}`,
-        caseId: c.id,
+        summary: `PayPal refund initiated and currently ${result.status} clearance. Refund ID: ${result.refundId}`,
         eventType: 'REFUND_EXECUTED',
-        actor: { type: 'PAYPAL_GATEWAY', name: 'PayPal Gateway Reconciliation' },
-        summary: `PayPal refund timed out or interrupted. Flagged for outbox reconciliation without blind retry: ${err.message}`,
-        details: { error: err.message, status: 'RECONCILIATION_REQUIRED', idempotencyKey: key },
-        timestamp: new Date().toISOString(),
-      };
-      c.timeline.push(reconEvent);
-      db.appendAuditEvent(reconEvent);
+        eventDetails: { refundId: result.refundId, status: result.status, idempotencyKey: key },
+      });
 
       await backgroundWorker.enqueue({
         eventType: 'RECONCILE_PENDING_REFUND',
@@ -1072,36 +1181,99 @@ const executeRefundHandler = async (req: AuthenticatedRequest, res: Response) =>
         },
         runAfterSeconds: 30,
       });
-      db.scheduleSave();
-      await db.updateRefundAttemptState(refundRecord);
 
       return res.status(202).json({
+        success: false,
+        status: 'PENDING',
+        message: 'PayPal refund accepted and pending settlement. Balance will update upon confirmation.',
+        refundAttempt: finalizedPending.refundAttempt,
+        case: finalizedPending.case || c,
+        order: finalizedPending.order || order,
+      });
+    } else {
+      const finalizedFail = await db.finalizeRefundTransaction({
+        attemptId: refundRecord.id,
+        outcome: 'FAILED',
+        paypalRefundId: result.refundId,
+        paypalResponse: result.rawResponse,
+        errorMessage: `PayPal rejected refund execution with status: ${result.status}`,
+        isSimulated: result.isSimulated,
+        caseStatusOnNonSuccess: 'REFUND_FAILED',
+        actor: { type: 'PAYPAL_GATEWAY', name: 'PayPal Sandbox Gateway' },
+        summary: `PayPal refund failed with provider status: ${result.status}`,
+        eventType: 'REFUND_FAILED',
+        eventDetails: { refundId: result.refundId, status: result.status, idempotencyKey: key },
+      });
+
+      return res.status(502).json({
+        success: false,
+        error: `PayPal refund failed with status: ${result.status}`,
+        refundAttempt: finalizedFail.refundAttempt,
+        case: finalizedFail.case || c,
+        order: finalizedFail.order || order,
+      });
+    }
+  } catch (err: any) {
+    const isTimeoutOrNetworkError =
+      err.name === 'AbortError' ||
+      err.code === 'ECONNRESET' ||
+      err.code === 'ETIMEDOUT' ||
+      err.message?.toLowerCase().includes('timeout') ||
+      err.message?.toLowerCase().includes('network') ||
+      err.message?.toLowerCase().includes('fetch failed');
+
+    if (isTimeoutOrNetworkError) {
+      const finalizedRecon = await db.finalizeRefundTransaction({
+        attemptId: refundRecord.id,
+        outcome: 'RECONCILIATION_REQUIRED',
+        errorCode: err.code,
+        errorMessage: `Network or gateway timeout: ${err.message}. Enqueued for background reconciliation.`,
+        caseStatusOnNonSuccess: 'REFUND_PENDING',
+        actor: { type: 'PAYPAL_GATEWAY', name: 'PayPal Gateway Reconciliation' },
+        summary: `PayPal refund timed out or interrupted. Flagged for outbox reconciliation without blind retry: ${err.message}`,
+        eventType: 'REFUND_EXECUTED',
+        eventDetails: { error: err.message, status: 'RECONCILIATION_REQUIRED', idempotencyKey: key },
+      });
+
+      await backgroundWorker.enqueue({
+        eventType: 'RECONCILE_PENDING_REFUND',
+        tenantId: c.tenantId,
+        payload: {
+          caseId: c.id,
+          refundAttemptId: refundRecord.id,
+          captureId: order.paypalCaptureId,
+          idempotencyKey: key,
+        },
+        runAfterSeconds: 30,
+      });
+
+      return res.status(202).json({
+        success: false,
         status: 'RECONCILIATION_REQUIRED',
         message: 'Refund request timed out or received uncertain network state. Queued for outbox reconciliation.',
-        refundAttempt: refundRecord,
+        refundAttempt: finalizedRecon.refundAttempt,
+        case: finalizedRecon.case || c,
       });
     }
 
-    refundRecord.status = 'FAILED';
-    refundRecord.errorMessage = err.message || 'PayPal refund execution failed';
-    c.status = 'REFUND_FAILED';
-    c.updatedAt = new Date().toISOString();
-    db.scheduleSave();
-    await db.updateRefundAttemptState(refundRecord);
-
-    const failEvent: CaseEvent = {
-      id: `ev-log-${Date.now()}`,
-      caseId: c.id,
-      eventType: 'REFUND_FAILED',
+    const finalizedErr = await db.finalizeRefundTransaction({
+      attemptId: refundRecord.id,
+      outcome: 'FAILED',
+      errorCode: err.code,
+      errorMessage: err.message || 'PayPal refund execution failed',
+      caseStatusOnNonSuccess: 'REFUND_FAILED',
       actor: { type: 'PAYPAL_GATEWAY', name: 'PayPal Sandbox' },
       summary: `PayPal refund rejected: ${err.message}`,
-      details: { error: err.message },
-      timestamp: new Date().toISOString(),
-    };
-    c.timeline.push(failEvent);
-    db.appendAuditEvent(failEvent);
+      eventType: 'REFUND_FAILED',
+      eventDetails: { error: err.message },
+    });
 
-    return res.status(500).json({ error: err.message || 'PayPal refund rejected', refundAttempt: refundRecord });
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'PayPal refund rejected',
+      refundAttempt: finalizedErr.refundAttempt,
+      case: finalizedErr.case || c,
+    });
   }
 };
 
@@ -1180,6 +1352,15 @@ app.post('/api/v1/evidence/upload', requireAuth, uploadLimiter, async (req: Auth
       } else if (evaluation.result === 'MANUAL_REVIEW_REQUIRED') {
         c.status = 'ESCALATED';
       }
+    }
+
+    if (db.isPostgresActive()) {
+      const storagePath = evidenceProcessor.getFilePath(result.evidence.id) || result.evidence.id;
+      await db.saveEvidenceObjectPg(result.evidence, c.tenantId, storagePath, req.user?.id);
+      if (c.policyEvaluation) {
+        await db.savePolicyEvaluationPg(c.id, c.policyEvaluation);
+      }
+      await db.saveCasePg(c);
     }
 
     db.scheduleSave();
@@ -1312,29 +1493,326 @@ const DEMO_CATALOG = {
   },
 };
 
+function sanitizeCheckoutResponse(checkout: PendingCheckout) {
+  const { stateTokenHash: _redacted, ...safe } = checkout;
+  return safe;
+}
+
+async function finalizePendingCheckoutCapture(params: {
+  checkout: PendingCheckout;
+  buyerName?: string;
+  buyerEmail?: string;
+}): Promise<{
+  statusCode: number;
+  alreadyCaptured?: boolean;
+  error?: string;
+  checkout: PendingCheckout;
+  order?: any;
+  case?: any;
+  customerAccessLink?: string;
+  isSimulated?: boolean;
+}> {
+  const { checkout, buyerName, buyerEmail } = params;
+
+  if (checkout.status === 'CAPTURED' && checkout.capturedOrderId && checkout.capturedCaseId) {
+    const existingOrder = db.orders[checkout.capturedOrderId];
+    const existingCase = db.cases[checkout.capturedCaseId];
+    if (existingOrder && existingCase) {
+      return {
+        statusCode: 200,
+        alreadyCaptured: true,
+        checkout,
+        order: existingOrder,
+        case: existingCase,
+        customerAccessLink: `/portal/${existingCase.customerAccessToken}`,
+        isSimulated: checkout.isSimulated,
+      };
+    }
+  }
+
+  if (checkout.status === 'CANCELLED') {
+    return {
+      statusCode: 409,
+      error: 'Checkout session was cancelled by the buyer and cannot be captured.',
+      checkout,
+    };
+  }
+
+  if (checkout.status === 'EXPIRED' || new Date(checkout.expiresAt).getTime() < Date.now()) {
+    checkout.status = 'EXPIRED';
+    checkout.failureReason = 'Pending checkout session expired prior to capture.';
+    checkout.updatedAt = new Date().toISOString();
+    if (db.isPostgresActive()) {
+      await db.savePendingCheckoutPg(checkout);
+    }
+    db.scheduleSave();
+    return {
+      statusCode: 410,
+      error: 'Checkout session has expired. Please start a new checkout order.',
+      checkout,
+    };
+  }
+
+  const product = DEMO_CATALOG[checkout.productType];
+  if (!product) {
+    return {
+      statusCode: 400,
+      error: `Unknown product catalog item '${checkout.productType}'.`,
+      checkout,
+    };
+  }
+
+  let captureResult;
+  try {
+    captureResult = await paypalGateway.captureOrder(checkout.paypalOrderId, {
+      amount: checkout.grossAmount,
+      currency: checkout.currency,
+    });
+  } catch (err: any) {
+    checkout.status = 'FAILED';
+    checkout.failureReason = err.message || 'PayPal capture request failed';
+    checkout.updatedAt = new Date().toISOString();
+    if (db.isPostgresActive()) {
+      await db.savePendingCheckoutPg(checkout);
+    }
+    db.scheduleSave();
+    return {
+      statusCode: 422,
+      error: checkout.failureReason,
+      checkout,
+    };
+  }
+
+  // Strictly reject non-COMPLETED captures before creating Order or Case
+  if (captureResult.status !== 'COMPLETED') {
+    checkout.status = 'FAILED';
+    checkout.failureReason = `PayPal capture did not complete (status: ${captureResult.status}). Order and dispute case were not created.`;
+    checkout.updatedAt = new Date().toISOString();
+    if (db.isPostgresActive()) {
+      await db.savePendingCheckoutPg(checkout);
+    }
+    db.scheduleSave();
+    return {
+      statusCode: captureResult.status === 'PENDING' ? 409 : 422,
+      error: checkout.failureReason,
+      checkout,
+    };
+  }
+
+  // Validate capture ID, exact amount (integer cents), and currency
+  const expectedCents = toCents(checkout.grossAmount);
+  const capturedCents = toCents(captureResult.grossAmount);
+  if (
+    !captureResult.captureId ||
+    !Number.isFinite(capturedCents) ||
+    capturedCents !== expectedCents ||
+    (captureResult.currency || '').toUpperCase() !== checkout.currency.toUpperCase()
+  ) {
+    checkout.status = 'FAILED';
+    checkout.failureReason = `PayPal capture verification failed: expected ${checkout.grossAmount.toFixed(2)} ${checkout.currency}, got ${captureResult.grossAmount} ${captureResult.currency}.`;
+    checkout.updatedAt = new Date().toISOString();
+    if (db.isPostgresActive()) {
+      await db.savePendingCheckoutPg(checkout);
+    }
+    db.scheduleSave();
+    return {
+      statusCode: 422,
+      error: checkout.failureReason,
+      checkout,
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const orderId = `ord-${Date.now().toString().slice(-6)}-${crypto.randomBytes(2).toString('hex')}`;
+  const newOrder: any = {
+    id: orderId,
+    tenantId: checkout.tenantId,
+    paypalOrderId: checkout.paypalOrderId,
+    paypalCaptureId: captureResult.captureId,
+    orderNumber: checkout.orderNumber,
+    buyerName: buyerName || checkout.buyerName || 'Sandbox Test Customer',
+    buyerEmail: buyerEmail || checkout.buyerEmail || captureResult.payerEmail || 'customer.test@example.com',
+    transactionDate: nowIso,
+    currency: checkout.currency,
+    grossAmount: checkout.grossAmount,
+    shippingAmount: checkout.shippingAmount,
+    refundedAmount: 0.0,
+    refundableAmount: checkout.grossAmount,
+    items: [
+      {
+        id: `item-${Date.now()}`,
+        sku: product.sku,
+        name: product.name,
+        quantity: 1,
+        unitPrice: product.unitPrice,
+        totalPrice: product.unitPrice,
+      },
+    ],
+    shippingCarrier: 'FedEx Express (Simulated Demo Tracking)',
+    trackingNumber: `SIM-TRK-${Math.floor(10000000 + Math.random() * 90000000)}`,
+    trackingSynthetic: true,
+    deliveryDate: nowIso,
+    status: 'COMPLETED',
+    isSimulated: captureResult.isSimulated,
+  };
+
+  db.orders[newOrder.id] = newOrder;
+
+  const customerToken = `tok_${crypto.randomBytes(16).toString('hex')}`;
+  const caseId = `case-${Date.now().toString().slice(-5)}-${crypto.randomBytes(2).toString('hex')}`;
+  const caseNumber = `FR-2026-${String(Object.keys(db.cases).length + 1).padStart(3, '0')}`;
+
+  const newCase: any = {
+    id: caseId,
+    tenantId: checkout.tenantId,
+    caseNumber,
+    orderId: newOrder.id,
+    orderNumber: newOrder.orderNumber,
+    paypalOrderId: newOrder.paypalOrderId,
+    paypalCaptureId: newOrder.paypalCaptureId,
+    customerName: newOrder.buyerName,
+    customerEmail: newOrder.buyerEmail,
+    status: 'NEW',
+    issueType: 'damaged_item',
+    requestedResolution: 'full_refund',
+    customerDescription: 'Transaction completed. Ready for customer claim or merchant investigation.',
+    customerAccessToken: customerToken,
+    tokenExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    evidence: [],
+    refundAttempts: [],
+    timeline: [
+      {
+        id: `ev-log-${Date.now()}`,
+        caseId,
+        eventType: 'CASE_CREATED',
+        actor: { type: 'SYSTEM', name: captureResult.isSimulated ? 'PayPal Simulated Checkout' : 'PayPal Sandbox Checkout' },
+        summary: `Verified PayPal checkout capture completed. Capture ID: ${newOrder.paypalCaptureId}`,
+        details: { isSimulated: captureResult.isSimulated, checkoutId: checkout.id },
+        timestamp: nowIso,
+      },
+    ],
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  db.cases[newCase.id] = newCase;
+
+  checkout.status = 'CAPTURED';
+  checkout.capturedOrderId = newOrder.id;
+  checkout.capturedCaseId = newCase.id;
+  checkout.capturedAt = nowIso;
+  checkout.updatedAt = nowIso;
+  checkout.isSimulated = captureResult.isSimulated;
+
+  if (db.isPostgresActive()) {
+    try {
+      await db.saveOrderPg(newOrder);
+      await db.saveCasePg(newCase);
+      await db.saveCustomerAccessTokenPg(newCase.id, customerToken, newCase.tokenExpiresAt);
+      await db.savePendingCheckoutPg(checkout);
+    } catch (dbErr: any) {
+      console.error('[Checkout] Failed to persist order/case to PostgreSQL:', dbErr.message);
+      return {
+        statusCode: 500,
+        error: `Database persistence failed: ${dbErr.message}`,
+        checkout,
+      };
+    }
+  }
+
+  db.scheduleSave();
+
+  return {
+    statusCode: 200,
+    alreadyCaptured: false,
+    checkout,
+    order: newOrder,
+    case: newCase,
+    customerAccessLink: `/portal/${customerToken}`,
+    isSimulated: captureResult.isSimulated,
+  };
+}
+
 // Create PayPal Order for Buyer Approval (Step 1)
 app.post('/api/v1/paypal/orders', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  const { productType } = req.body;
-  const product = DEMO_CATALOG[productType as keyof typeof DEMO_CATALOG] || DEMO_CATALOG.headphones;
-  const grossAmount = product.unitPrice + product.shipping;
+  const { productType, buyerName, buyerEmail } = req.body;
+  if (!productType || !(productType in DEMO_CATALOG)) {
+    return res.status(400).json({
+      error: `Invalid productType '${productType}'. Allowed: ${Object.keys(DEMO_CATALOG).join(', ')}`,
+    });
+  }
+
+  const typedProductKey = productType as keyof typeof DEMO_CATALOG;
+  const product = DEMO_CATALOG[typedProductKey];
+  const grossCents = toCents(product.unitPrice) + toCents(product.shipping);
+  const grossAmount = toDollars(grossCents);
   const orderNumber = `APX-2026-${Math.floor(1000 + Math.random() * 9000)}`;
+  const checkoutState = crypto.randomBytes(24).toString('hex');
+  const stateTokenHash = crypto.createHash('sha256').update(checkoutState).digest('hex');
+
+  const returnUrl = `${config.APP_BASE_URL}/api/v1/paypal/checkout/return?checkoutState=${checkoutState}`;
+  const cancelUrl = `${config.APP_BASE_URL}/api/v1/paypal/checkout/cancel?checkoutState=${checkoutState}`;
 
   try {
     const result = await paypalGateway.createOrder({
       amount: grossAmount,
       currency: 'USD',
       orderNumber,
-      items: [{ name: product.name, unitPrice: product.unitPrice, quantity: 1 }],
+      items: [{ name: product.name, sku: product.sku, unitPrice: product.unitPrice, quantity: 1 }],
+      shippingAmount: product.shipping,
+      returnUrl,
+      cancelUrl,
     });
 
+    const nowIso = new Date().toISOString();
+    const pendingCheckout: PendingCheckout = {
+      id: `chk-${crypto.randomUUID().slice(0, 12)}`,
+      tenantId: req.tenantId!,
+      createdBy: req.user?.id || 'system',
+      paypalOrderId: result.orderId,
+      orderNumber,
+      productType: typedProductKey,
+      productSku: product.sku,
+      productName: product.name,
+      quantity: 1,
+      unitPrice: product.unitPrice,
+      unitPriceCents: toCents(product.unitPrice),
+      shippingAmount: product.shipping,
+      shippingAmountCents: toCents(product.shipping),
+      grossAmount,
+      grossAmountCents: grossCents,
+      currency: 'USD',
+      buyerName: typeof buyerName === 'string' && buyerName.trim() ? buyerName.trim() : undefined,
+      buyerEmail: typeof buyerEmail === 'string' && buyerEmail.trim() ? buyerEmail.trim() : undefined,
+      stateTokenHash,
+      approveUrl: result.approveUrl,
+      isSimulated: result.isSimulated,
+      status: 'PENDING',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    };
+
+    db.pendingCheckouts[pendingCheckout.id] = pendingCheckout;
+    if (db.isPostgresActive()) {
+      await db.savePendingCheckoutPg(pendingCheckout);
+    }
+    db.scheduleSave();
+
     res.json({
+      checkoutId: pendingCheckout.id,
       orderId: result.orderId,
       approveUrl: result.approveUrl,
       orderNumber,
       grossAmount,
+      unitPrice: product.unitPrice,
+      shippingAmount: product.shipping,
       currency: 'USD',
       product,
+      checkoutState,
       isSimulated: result.isSimulated,
+      payloadPreview: result.payloadPreview,
+      expiresAt: pendingCheckout.expiresAt,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to initialize PayPal order' });
@@ -1344,109 +1822,178 @@ app.post('/api/v1/paypal/orders', requireAuth, async (req: AuthenticatedRequest,
 // Capture PayPal Order after Buyer Approves (Step 2)
 app.post('/api/v1/paypal/orders/:id/capture', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   const paypalOrderId = req.params.id;
-  const { productType, buyerName, buyerEmail, orderNumber } = req.body;
+  const { buyerName, buyerEmail } = req.body;
   const tenantId = req.tenantId!;
 
-  const product = DEMO_CATALOG[productType as keyof typeof DEMO_CATALOG] || DEMO_CATALOG.headphones;
-  const grossAmount = product.unitPrice + product.shipping;
-  const finalOrderNumber = orderNumber || `APX-2026-${Math.floor(1000 + Math.random() * 9000)}`;
-
-  try {
-    const captureResult = await paypalGateway.captureOrder(paypalOrderId);
-
-    const orderId = `ord-${Date.now().toString().slice(-6)}`;
-    const newOrder: any = {
-      id: orderId,
-      tenantId,
-      paypalOrderId,
-      paypalCaptureId: captureResult.captureId,
-      orderNumber: finalOrderNumber,
-      buyerName: buyerName || 'Sandbox Test Customer',
-      buyerEmail: buyerEmail || captureResult.payerEmail || 'customer.test@example.com',
-      transactionDate: new Date().toISOString(),
-      currency: 'USD',
-      grossAmount,
-      shippingAmount: product.shipping,
-      refundedAmount: 0.0,
-      refundableAmount: grossAmount,
-      items: [
-        {
-          id: `item-${Date.now()}`,
-          sku: product.sku,
-          name: product.name,
-          quantity: 1,
-          unitPrice: product.unitPrice,
-          totalPrice: product.unitPrice,
-        },
-      ],
-      shippingCarrier: 'FedEx Express (Sandbox)',
-      trackingNumber: `7829${Math.floor(10000000 + Math.random() * 90000000)}`,
-      deliveryDate: new Date().toISOString(),
-      status: 'COMPLETED',
-    };
-
-    db.orders[newOrder.id] = newOrder;
-
-    const customerToken = `tok_${crypto.randomUUID().substring(0, 16)}`;
-    const caseId = `case-${Date.now().toString().slice(-5)}`;
-    const caseNumber = `FR-2026-${String(Object.keys(db.cases).length + 1).padStart(3, '0')}`;
-
-    const newCase: any = {
-      id: caseId,
-      tenantId,
-      caseNumber,
-      orderId: newOrder.id,
-      orderNumber: newOrder.orderNumber,
-      paypalOrderId: newOrder.paypalOrderId,
-      paypalCaptureId: newOrder.paypalCaptureId,
-      customerName: newOrder.buyerName,
-      customerEmail: newOrder.buyerEmail,
-      status: 'NEW',
-      issueType: 'damaged_item',
-      requestedResolution: 'full_refund',
-      customerDescription: 'Transaction completed. Ready for customer claim or merchant investigation.',
-      customerAccessToken: customerToken,
-      tokenExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-      evidence: [],
-      refundAttempts: [],
-      timeline: [
-        {
-          id: `ev-log-${Date.now()}`,
-          caseId,
-          eventType: 'CASE_CREATED',
-          actor: { type: 'SYSTEM', name: 'PayPal Sandbox Checkout' },
-          summary: `Verified PayPal Sandbox checkout completed. Capture ID: ${newOrder.paypalCaptureId}`,
-          details: { isSimulated: captureResult.isSimulated },
-          timestamp: new Date().toISOString(),
-        },
-      ],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    db.cases[newCase.id] = newCase;
-    db.scheduleSave();
-
-    if (db.isPostgresActive()) {
-      try {
-        await db.saveOrderPg(newOrder);
-        await db.saveCasePg(newCase);
-      } catch (dbErr: any) {
-        console.error('[Checkout] Failed to persist order/case to PostgreSQL:', dbErr.message);
-        return res.status(500).json({ error: `Database persistence failed: ${dbErr.message}` });
-      }
-    }
-
-    res.json({
-      success: true,
-      order: newOrder,
-      case: newCase,
-      customerAccessLink: `/portal/${customerToken}`,
-      isSimulated: captureResult.isSimulated,
+  const pendingCheckout = await db.getPendingCheckoutByPayPalOrderId(paypalOrderId);
+  if (!pendingCheckout) {
+    return res.status(404).json({
+      error: `Pending checkout for PayPal order '${paypalOrderId}' not found. Initiate checkout via POST /api/v1/paypal/orders first.`,
     });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Checkout capture failed' });
   }
+
+  if (pendingCheckout.tenantId !== tenantId) {
+    return res.status(403).json({ error: 'Access denied: Pending checkout belongs to a different tenant.' });
+  }
+
+  const finalized = await finalizePendingCheckoutCapture({
+    checkout: pendingCheckout,
+    buyerName,
+    buyerEmail,
+  });
+
+  if (finalized.error) {
+    return res.status(finalized.statusCode).json({
+      error: finalized.error,
+      checkout: sanitizeCheckoutResponse(finalized.checkout),
+    });
+  }
+
+  return res.json({
+    success: true,
+    alreadyCaptured: Boolean(finalized.alreadyCaptured),
+    checkout: sanitizeCheckoutResponse(finalized.checkout),
+    order: finalized.order,
+    case: finalized.case,
+    customerAccessLink: finalized.customerAccessLink,
+    isSimulated: finalized.isSimulated,
+  });
+});
+
+// PayPal Return Redirect Callback (authorizes capture via single-use checkoutState token)
+app.get('/api/v1/paypal/checkout/return', async (req, res) => {
+  const checkoutState = typeof req.query.checkoutState === 'string' ? req.query.checkoutState.trim() : '';
+  const paypalToken = typeof req.query.token === 'string' ? req.query.token.trim() : '';
+
+  if (!checkoutState) {
+    return res.redirect(302, '/?tab=checkout&checkoutStatus=error&message=' + encodeURIComponent('Missing checkoutState token.'));
+  }
+
+  const pendingCheckout = await db.getPendingCheckoutByStateToken(checkoutState);
+  if (!pendingCheckout) {
+    return res.redirect(302, '/?tab=checkout&checkoutStatus=error&message=' + encodeURIComponent('Checkout state is invalid or unknown.'));
+  }
+
+  if (paypalToken && paypalToken !== pendingCheckout.paypalOrderId) {
+    return res.redirect(
+      302,
+      `/?tab=checkout&checkoutStatus=error&checkoutId=${encodeURIComponent(pendingCheckout.id)}&message=${encodeURIComponent('PayPal order token mismatch.')}`
+    );
+  }
+
+  if (pendingCheckout.status === 'CAPTURED') {
+    return res.redirect(
+      302,
+      `/?tab=checkout&checkoutStatus=captured&checkoutId=${encodeURIComponent(pendingCheckout.id)}&replayed=true`
+    );
+  }
+
+  if (pendingCheckout.status === 'CANCELLED') {
+    return res.redirect(
+      302,
+      `/?tab=checkout&checkoutStatus=cancelled&checkoutId=${encodeURIComponent(pendingCheckout.id)}`
+    );
+  }
+
+  const finalized = await finalizePendingCheckoutCapture({ checkout: pendingCheckout });
+  if (finalized.error) {
+    const statusParam = finalized.checkout.status === 'EXPIRED' ? 'expired' : 'error';
+    return res.redirect(
+      302,
+      `/?tab=checkout&checkoutStatus=${statusParam}&checkoutId=${encodeURIComponent(pendingCheckout.id)}&message=${encodeURIComponent(finalized.error)}`
+    );
+  }
+
+  return res.redirect(
+    302,
+    `/?tab=checkout&checkoutStatus=captured&checkoutId=${encodeURIComponent(pendingCheckout.id)}`
+  );
+});
+
+// PayPal Cancel Redirect Callback
+app.get('/api/v1/paypal/checkout/cancel', async (req, res) => {
+  const checkoutState = typeof req.query.checkoutState === 'string' ? req.query.checkoutState.trim() : '';
+  if (!checkoutState) {
+    return res.redirect(302, '/?tab=checkout&checkoutStatus=cancelled');
+  }
+
+  const pendingCheckout = await db.getPendingCheckoutByStateToken(checkoutState);
+  if (pendingCheckout && pendingCheckout.status === 'PENDING') {
+    pendingCheckout.status = 'CANCELLED';
+    pendingCheckout.updatedAt = new Date().toISOString();
+    if (db.isPostgresActive()) {
+      await db.savePendingCheckoutPg(pendingCheckout);
+    }
+    db.scheduleSave();
+  }
+
+  const idParam = pendingCheckout ? `&checkoutId=${encodeURIComponent(pendingCheckout.id)}` : '';
+  return res.redirect(302, `/?tab=checkout&checkoutStatus=cancelled${idParam}`);
+});
+
+// Fetch verified Checkout/Order/Case result for UI after return redirect
+app.get('/api/v1/paypal/checkouts/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const lookup = req.params.id;
+  let pendingCheckout =
+    db.pendingCheckouts[lookup] ||
+    (await db.getPendingCheckoutByPayPalOrderId(lookup));
+
+  if (!pendingCheckout && db.isPostgresActive() && db.getPgPool()) {
+    try {
+      const result = await db.getPgPool()!.query('SELECT * FROM pending_checkouts WHERE id = $1 LIMIT 1', [lookup]);
+      if (result.rows.length > 0) {
+        const r = result.rows[0];
+        pendingCheckout = {
+          id: r.id,
+          tenantId: r.tenant_id,
+          createdBy: r.created_by || 'system',
+          paypalOrderId: r.paypal_order_id,
+          orderNumber: r.order_number,
+          productType: r.product_type,
+          productSku: r.product_sku || '',
+          productName: r.product_name,
+          quantity: Number(r.quantity || 1),
+          unitPrice: Number(r.unit_price_cents) / 100,
+          unitPriceCents: Number(r.unit_price_cents),
+          shippingAmount: Number(r.shipping_amount_cents) / 100,
+          shippingAmountCents: Number(r.shipping_amount_cents),
+          grossAmount: Number(r.gross_amount_cents) / 100,
+          grossAmountCents: Number(r.gross_amount_cents),
+          currency: r.currency,
+          buyerName: r.buyer_name || undefined,
+          buyerEmail: r.buyer_email || undefined,
+          stateTokenHash: r.state_token_hash,
+          approveUrl: r.approve_url || undefined,
+          isSimulated: Boolean(r.is_simulated),
+          status: r.status,
+          capturedOrderId: r.captured_order_id || undefined,
+          capturedCaseId: r.captured_case_id || undefined,
+          failureReason: r.failure_reason || undefined,
+          createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
+          updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
+          expiresAt: r.expires_at ? new Date(r.expires_at).toISOString() : new Date().toISOString(),
+          capturedAt: r.captured_at ? new Date(r.captured_at).toISOString() : undefined,
+        };
+        db.pendingCheckouts[pendingCheckout.id] = pendingCheckout;
+      }
+    } catch {
+      // Ignore PG lookup errors and fall through to 404
+    }
+  }
+
+  if (!pendingCheckout || pendingCheckout.tenantId !== req.tenantId) {
+    return res.status(404).json({ error: 'Checkout record not found' });
+  }
+
+  const order = pendingCheckout.capturedOrderId ? db.orders[pendingCheckout.capturedOrderId] : undefined;
+  const c = pendingCheckout.capturedCaseId ? db.cases[pendingCheckout.capturedCaseId] : undefined;
+
+  return res.json({
+    checkout: sanitizeCheckoutResponse(pendingCheckout),
+    order,
+    case: c,
+    customerAccessLink: c?.customerAccessToken ? `/portal/${c.customerAccessToken}` : undefined,
+  });
 });
 
 // Deprecated single-step demo checkout route (enforcing genuine 2-step buyer approval)
@@ -1515,6 +2062,7 @@ app.post('/api/v1/customer/case/:token/submit', uploadLimiter, async (req, res) 
   c.status = 'ANALYZING';
   c.updatedAt = new Date().toISOString();
 
+  const uploadedEvidences: any[] = [];
   if (Array.isArray(uploadedFiles)) {
     for (const f of uploadedFiles) {
       if (f.fileBase64 && f.filename) {
@@ -1528,8 +2076,10 @@ app.post('/api/v1/customer/case/:token/submit', uploadLimiter, async (req, res) 
             f.caption
           );
           c.evidence.push(uploaded.evidence);
-        } catch (e) {
-          console.warn('Error processing customer portal file:', e);
+          uploadedEvidences.push(uploaded.evidence);
+        } catch (e: any) {
+          c.status = c.evidence.length > 0 ? 'READY_FOR_REVIEW' : 'NEW';
+          return res.status(400).json({ error: e.message || 'Evidence processing failed for customer portal upload' });
         }
       }
     }
@@ -1583,6 +2133,21 @@ app.post('/api/v1/customer/case/:token/submit', uploadLimiter, async (req, res) 
   };
   c.timeline.push(submitEvent);
   db.appendAuditEvent(submitEvent);
+
+  if (db.isPostgresActive()) {
+    for (const ev of uploadedEvidences) {
+      const storagePath = evidenceProcessor.getFilePath(ev.id) || ev.id;
+      await db.saveEvidenceObjectPg(ev, c.tenantId, storagePath);
+    }
+    if (c.aiInvestigation) {
+      await db.saveAiRunPg(c.id, c.aiInvestigation);
+    }
+    if (c.policyEvaluation) {
+      await db.savePolicyEvaluationPg(c.id, c.policyEvaluation);
+    }
+    await db.saveCasePg(c);
+  }
+
   db.scheduleSave();
 
   res.json({ success: true, caseId: c.id, status: c.status });
@@ -1601,7 +2166,7 @@ app.post(
   '/api/v1/policies/publish',
   requireAuth,
   requireRoles(['OWNER', 'ADMIN']),
-  (req: AuthenticatedRequest, res: Response) => {
+  async (req: AuthenticatedRequest, res: Response) => {
     const {
       returnWindowDays,
       requirePackagingPhotoForDamage,
@@ -1632,6 +2197,9 @@ app.post(
 
     currentList.push(newPolicy);
     db.policies[req.tenantId!] = currentList;
+    if (db.isPostgresActive()) {
+      await db.savePolicyPg(req.tenantId!, newPolicy);
+    }
     db.scheduleSave();
 
     res.json({ success: true, policy: newPolicy });
@@ -1648,37 +2216,41 @@ app.get('/api/v1/paypal/status', requireAuth, (_req: AuthenticatedRequest, res: 
 });
 
 app.post('/api/v1/paypal/verify', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
-  const isConfigured = paypalGateway.isConfigured();
-  if (!isConfigured) {
-    return res.json({
-      success: false,
-      isConfigured: false,
-      message:
-        'PayPal Sandbox credentials are not currently set in .env. Running in Sandbox Verification / Simulation mode.',
-    });
-  }
-
-  try {
-    await paypalGateway.getAccessToken();
-    return res.json({
-      success: true,
-      isConfigured: true,
-      message: 'Successfully authenticated with PayPal Sandbox OAuth endpoint.',
-    });
-  } catch (err: any) {
-    return res.json({
-      success: false,
-      isConfigured: true,
-      message: err.message || 'Authentication to PayPal Sandbox failed.',
-    });
-  }
+  const verifyResult = await paypalGateway.verifyCredentials();
+  const status = db.getGatewayStatus();
+  return res.json({
+    success: verifyResult.success,
+    isConfigured: paypalGateway.isConfigured(),
+    verificationStatus: verifyResult.status,
+    message: verifyResult.message,
+    gatewayStatus: status,
+  });
 });
 
 // PayPal Webhooks endpoint with cryptographic signature verification
 app.post('/api/v1/webhooks/paypal', async (req, res) => {
-  const eventId = req.body?.id;
-  if (!eventId) {
-    return res.status(400).json({ error: 'Missing PayPal webhook event id' });
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    return res.status(400).json({ error: 'Malformed PayPal webhook JSON payload' });
+  }
+
+  const eventId = req.body.id;
+  const eventType = req.body.event_type;
+  if (!eventId || typeof eventId !== 'string' || !eventType || typeof eventType !== 'string') {
+    return res.status(400).json({ error: 'Missing required PayPal webhook fields (id, event_type)' });
+  }
+
+  const webhookId = config.PAYPAL_WEBHOOK_ID || process.env.PAYPAL_WEBHOOK_ID || '';
+  if (
+    !paypalGateway.isConfigured() ||
+    !webhookId ||
+    webhookId === 'WH-SANDBOX-DEFAULT' ||
+    webhookId === 'UNCONFIGURED' ||
+    webhookId.includes('your-')
+  ) {
+    return res.status(503).json({
+      error: 'PayPal Webhook verification is unconfigured. Provide valid PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, and PAYPAL_WEBHOOK_ID.',
+      configured: false,
+    });
   }
 
   // Deduplication: A repeated event ID must not be processed twice
@@ -1691,14 +2263,6 @@ app.post('/api/v1/webhooks/paypal', async (req, res) => {
   const transmissionId = req.headers['paypal-transmission-id'] as string;
   const transmissionSig = req.headers['paypal-transmission-sig'] as string;
   const transmissionTime = req.headers['paypal-transmission-time'] as string;
-  const webhookId = config.PAYPAL_WEBHOOK_ID || process.env.PAYPAL_WEBHOOK_ID;
-
-  if (!webhookId || webhookId === 'WH-SANDBOX-DEFAULT' || webhookId === 'UNCONFIGURED') {
-    return res.status(503).json({
-      error: 'PayPal Webhook integration is unconfigured. Provide a registered Sandbox webhook ID via PAYPAL_WEBHOOK_ID.',
-      configured: false,
-    });
-  }
 
   const isValid = await paypalGateway.verifyWebhookSignature({
     authAlgo,
@@ -1715,20 +2279,37 @@ app.post('/api/v1/webhooks/paypal', async (req, res) => {
     return res.status(400).json({ error: 'Invalid PayPal webhook signature' });
   }
 
-  db.markWebhookProcessed(eventId);
+  try {
+    db.markWebhookProcessed(eventId);
+    if (db.isPostgresActive()) {
+      await db.persistWebhookEventPg({
+        eventId,
+        eventType,
+        resourceType: req.body?.resource_type,
+        resourceId: req.body?.resource?.id,
+        summary: req.body?.summary,
+        verificationStatus: 'VERIFIED',
+        rawPayload: req.body,
+        processed: true,
+      });
+    }
 
-  // Enqueue webhook for durable processing
-  await backgroundWorker.enqueue({
-    eventType: 'PAYPAL_WEBHOOK_EVENT',
-    tenantId: 'system',
-    payload: {
-      eventId,
-      eventType: req.body?.event_type,
-      resource: req.body?.resource,
-    },
-  });
+    // Enqueue webhook for durable processing
+    await backgroundWorker.enqueue({
+      eventType: 'PAYPAL_WEBHOOK_EVENT',
+      tenantId: 'system',
+      payload: {
+        webhookEventId: eventId,
+        webhookEventType: eventType,
+        resource: req.body.resource,
+      },
+    });
 
-  res.status(200).json({ received: true });
+    return res.status(200).json({ received: true });
+  } catch (err: any) {
+    console.error('[Webhook] Failed to persist or enqueue verified webhook:', err.message);
+    return res.status(500).json({ error: err.message || 'Webhook processing error' });
+  }
 });
 
 // -------------------------------------------------------------
@@ -1782,27 +2363,50 @@ async function startServer() {
   } else {
     const distPath = path.resolve(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path.startsWith('/health/')) {
+        return next();
+      }
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`FairResolve Platform active on http://localhost:${PORT}`);
+    console.log(`FairResolve Platform active on http://0.0.0.0:${PORT}`);
   });
 
   // Graceful shutdown handling
-  const shutdown = () => {
-    console.log('Shutting down FairResolve gracefully...');
-    backgroundWorker.stop();
-    server.close(() => {
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`Received ${signal}. Shutting down FairResolve gracefully...`);
+    try {
+      await backgroundWorker.stopAndWait();
+      await new Promise<void>((resolve) => {
+        const forceTimer = setTimeout(() => resolve(), 8000);
+        server.close(() => {
+          clearTimeout(forceTimer);
+          resolve();
+        });
+      });
+      await db.flush();
+      await db.closePool();
+    } catch (err: any) {
+      console.error('Error during graceful shutdown:', err.message);
+    } finally {
       process.exit(0);
-    });
+    }
   };
 
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
+
+// Ensure unknown /api/* returns JSON 404 even when imported directly in tests without startServer()
+app.all('/api/*', (_req, res) => {
+  res.status(404).json({ error: 'API route not found' });
+});
 
 if (process.env.NODE_ENV !== 'test') {
   startServer();

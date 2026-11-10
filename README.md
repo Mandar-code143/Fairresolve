@@ -80,7 +80,8 @@ FairResolve enforces strict role-based access control across all API endpoints:
 
 | Capability | OWNER | ADMIN | REVIEWER | ANALYST | VIEWER |
 |---|:---:|:---:|:---:|:---:|:---:|
-| Authorize & Execute PayPal Refunds | **YES** | **YES** | **YES** | NO | NO |
+| Execute PayPal Refunds (Four-Eyes) | **YES** | **YES** | NO | NO | NO |
+| Approve Refunds & Review Cases | **YES** | **YES** | **YES** | NO | NO |
 | Publish & Edit Refund Policies | **YES** | **YES** | NO | NO | NO |
 | Execute AI Multimodal Investigation | **YES** | **YES** | **YES** | **YES** | NO |
 | Upload & Fingerprint Evidence | **YES** | **YES** | **YES** | **YES** | NO |
@@ -91,37 +92,27 @@ FairResolve enforces strict role-based access control across all API endpoints:
 
 ## 4. Automated Test Suite
 
-FairResolve includes a comprehensive Vitest automated test suite covering unit logic and security boundaries:
+FairResolve includes a comprehensive Vitest automated suite covering unit, security, real PostgreSQL 16 migrations/persistence, and production Express app smoke tests:
 
 ```bash
-npm test
+pnpm test
 ```
 
-### Verified Test Suites (21/21 Passing):
+### Verified Test Suites:
 1. **`tests/unit/auth.test.ts`**:
-   - scrypt password hashing with 32-byte salt uniqueness.
-   - Timing-safe password verification (`crypto.timingSafeEqual`).
-   - Password strength complexity checks.
-   - High-entropy session generation with SHA-256 token hashing.
-   - Session revocation.
-   - RBAC permission hierarchy validation.
-2. **`tests/unit/policyEngine.test.ts`**:
-   - Minor unit (cents) integer conversion and arithmetic precision.
-   - Business day calculation excluding weekends.
-   - Policy eligibility criteria evaluation (`R-WINDOW`, `R-DMG-EVID`).
-   - Evidence deduplication collision detection (`R-DEDUP`).
-   - Late claim rejection (`INELIGIBLE_UNDER_CONFIGURED_POLICY`).
-   - Decimal-exact partial refund limits.
-3. **`tests/unit/auditLedger.test.ts`**:
-   - Sequential SHA-256 block hash chaining (`previousHash` -> `currentHash`).
-   - Integrity verification passes on uncorrupted chains.
-   - Post-hoc payload tampering detection and exact block index localization.
-4. **`tests/integration/securityNegative.test.ts`**:
-   - 401 Unauthorized on unauthenticated requests.
-   - 401 Unauthorized on forged/invalid tokens.
-   - 403 Forbidden on unauthorized VIEWER attempting refund.
-   - 400 Bad Request on refund amounts exceeding refundable balance.
-   - 403 Forbidden on expired customer dispute links.
+   - scrypt password hashing with 32-byte salt uniqueness and timing-safe verification.
+   - High-entropy session generation with SHA-256 token hashing and revocation.
+   - Five-role RBAC permission hierarchy validation.
+2. **`tests/unit/paypalGateway.test.ts` & `tests/unit/webhookVerification.test.ts`**:
+   - Exact integer-cent PayPal Orders v2 breakdowns and mismatch rejection.
+   - Capture status/amount/currency validation and simulation parity.
+   - Fail-closed PayPal webhook signature verification, SSRF `cert_url` guards, and deduplication.
+3. **`tests/unit/policyEngine.test.ts` & `tests/unit/auditLedger.test.ts`**:
+   - Minor unit (cents) integer arithmetic, business-day transit checks, evidence dedup rules.
+   - SHA-256 audit hash chaining and tamper detection.
+4. **`tests/integration/postgresReal.test.ts` & `tests/integration/appSmoke.test.ts`**:
+   - Versioned migration execution (`v1 -> v2 -> v3`) and full API lifecycle against real PostgreSQL 16 (executed in CI).
+   - End-to-end production Express app tests for auth, all 3 catalog checkout products, single-use return/cancel redirects, Sharp JPEG/PNG/WEBP evidence uploads, four-eyes refunds, timeout reconciliation, CORS/CSRF, and health checks.
 
 ---
 
@@ -144,13 +135,21 @@ PAYPAL_CLIENT_ID="your-paypal-sandbox-client-id"
 PAYPAL_CLIENT_SECRET="your-paypal-sandbox-client-secret"
 PAYPAL_ENVIRONMENT="sandbox"
 PAYPAL_LIVE_ENABLED="false"
-PAYPAL_WEBHOOK_ID="WH-SANDBOX-DEFAULT"
+PAYPAL_WEBHOOK_ID=""
+
+# Persistent Storage & Public App Base URL (Railway Deployment)
+FAIRRESOLVE_STORAGE_DIR="/app/data"
+APP_BASE_URL="http://localhost:3000"
+ALLOWED_ORIGINS="http://localhost:3000"
+RUN_IN_PROCESS_WORKER="true"
+SERVICE_TYPE="app"
+SESSION_SECRET=""
 
 # Google Gemini API Key (get from ai.google.dev)
 GEMINI_API_KEY="your-gemini-api-key"
 GEMINI_MODEL="gemini-2.5-flash"
 
-# Optional: PostgreSQL Database URL
+# Optional locally, REQUIRED in production / Railway: PostgreSQL Database URL
 DATABASE_URL="postgres://fairresolve:fairresolve_secret@localhost:5432/fairresolve"
 ```
 *(Note: If credentials are not set, FairResolve runs in verified Sandbox Simulation mode with labeled demo provenance).*
@@ -161,29 +160,31 @@ DATABASE_URL="postgres://fairresolve:fairresolve_secret@localhost:5432/fairresol
 pnpm install
 
 # Run type check and tests
-npm run lint
-npm test
+pnpm run lint
+pnpm test
 
 # Start development server
-npm run dev
+pnpm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) to access the FairResolve platform.
 
 ---
 
-## 6. Docker & Container Deployment
+## 6. Docker, Compose & Railway Deployment
 
-FairResolve includes a multi-stage production Dockerfile and Docker Compose environment with integrated PostgreSQL 16 and automated database migrations:
+FairResolve includes a multi-stage production Dockerfile, Docker Compose setup with PostgreSQL 16 + automated schema migrations, and a dedicated Railway deployment guide:
 
 ```bash
-# Build and start all services (App + PostgreSQL)
+# Build and start all services (App + Worker + PostgreSQL)
 docker compose up --build -d
 
 # Check service health
 docker compose ps
 curl http://localhost:3000/health/ready
 ```
+
+For single-instance Railway deployment instructions (`Service + Managed PostgreSQL + /app/data Volume`), see [`docs/RAILWAY_DEPLOYMENT.md`](docs/RAILWAY_DEPLOYMENT.md).
 
 ---
 

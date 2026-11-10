@@ -60,10 +60,10 @@ CREATE TABLE IF NOT EXISTS invitations (
     id VARCHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     email VARCHAR(255) NOT NULL,
-    name VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL DEFAULT '',
     role VARCHAR(32) NOT NULL CHECK (role IN ('OWNER', 'ADMIN', 'REVIEWER', 'ANALYST', 'VIEWER')),
     token_hash VARCHAR(64) NOT NULL UNIQUE,
-    invited_by VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE SET NULL,
+    invited_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACCEPTED', 'EXPIRED', 'REVOKED')),
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -258,14 +258,18 @@ CREATE TABLE IF NOT EXISTS refund_approvals (
     id VARCHAR(64) PRIMARY KEY,
     case_id VARCHAR(64) NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
     tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    order_id VARCHAR(64),
     authorized_by VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     approved_amount_cents BIGINT NOT NULL CHECK (approved_amount_cents > 0),
     currency VARCHAR(3) NOT NULL DEFAULT 'USD',
     capture_id VARCHAR(128) NOT NULL,
     case_version VARCHAR(32) NOT NULL DEFAULT 'v1',
     policy_version VARCHAR(32) NOT NULL,
+    policy_evaluation_id VARCHAR(64),
     notes TEXT,
-    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'CONSUMED', 'REVOKED', 'SUPERSEDED')),
+    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE' CONSTRAINT chk_refund_approvals_status CHECK (status IN ('ACTIVE', 'CONSUMED', 'REVOKED', 'EXPIRED', 'SUPERSEDED')),
+    expires_at TIMESTAMPTZ,
+    consumed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -274,13 +278,16 @@ CREATE TABLE IF NOT EXISTS refund_attempts (
     case_id VARCHAR(64) NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
     tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     approval_id VARCHAR(64) REFERENCES refund_approvals(id) ON DELETE SET NULL,
+    approver_id VARCHAR(64),
+    executor_id VARCHAR(64),
     capture_id VARCHAR(128) NOT NULL,
     idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+    request_fingerprint VARCHAR(128),
     amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
     currency VARCHAR(3) NOT NULL DEFAULT 'USD',
     reason TEXT NOT NULL,
-    status VARCHAR(32) NOT NULL DEFAULT 'RESERVED' CHECK (
-        status IN ('CREATED', 'RESERVED', 'SUBMITTED', 'PENDING', 'COMPLETED', 'FAILED', 'UNKNOWN', 'RECONCILIATION_REQUIRED')
+    status VARCHAR(32) NOT NULL DEFAULT 'RESERVED' CONSTRAINT chk_refund_attempts_status CHECK (
+        status IN ('CREATED', 'RESERVED', 'SUBMITTED', 'PENDING', 'SUCCEEDED', 'COMPLETED', 'FAILED', 'UNKNOWN', 'RECONCILIATION_REQUIRED')
     ),
     paypal_refund_id VARCHAR(128),
     paypal_response JSONB,
@@ -290,6 +297,35 @@ CREATE TABLE IF NOT EXISTS refund_attempts (
     is_simulated BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS pending_checkouts (
+    id VARCHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    created_by VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    paypal_order_id VARCHAR(128) UNIQUE,
+    order_number VARCHAR(128) NOT NULL,
+    product_type VARCHAR(64) NOT NULL,
+    product_sku VARCHAR(64) NOT NULL,
+    product_name VARCHAR(255) NOT NULL,
+    quantity INT NOT NULL DEFAULT 1 CHECK (quantity > 0),
+    unit_price_cents BIGINT NOT NULL CHECK (unit_price_cents >= 0),
+    shipping_amount_cents BIGINT NOT NULL DEFAULT 0 CHECK (shipping_amount_cents >= 0),
+    gross_amount_cents BIGINT NOT NULL CHECK (gross_amount_cents > 0),
+    currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+    buyer_name VARCHAR(255),
+    buyer_email VARCHAR(255),
+    state_token_hash VARCHAR(64) NOT NULL UNIQUE,
+    status VARCHAR(32) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CAPTURED', 'CANCELLED', 'EXPIRED', 'FAILED')),
+    is_simulated BOOLEAN NOT NULL DEFAULT FALSE,
+    approve_url TEXT,
+    captured_order_id VARCHAR(64) REFERENCES orders(id) ON DELETE SET NULL,
+    captured_case_id VARCHAR(64) REFERENCES cases(id) ON DELETE SET NULL,
+    failure_reason TEXT,
+    expires_at TIMESTAMPTZ NOT NULL,
+    captured_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -315,7 +351,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
 
 CREATE TABLE IF NOT EXISTS outbox_events (
     id VARCHAR(64) PRIMARY KEY,
-    tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(64) REFERENCES tenants(id) ON DELETE CASCADE,
     event_type VARCHAR(64) NOT NULL,
     payload JSONB NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'DEAD_LETTER')),
@@ -364,3 +400,6 @@ CREATE INDEX IF NOT EXISTS idx_refund_attempts_idemp ON refund_attempts(idempote
 CREATE INDEX IF NOT EXISTS idx_audit_tenant_case ON audit_events(tenant_id, case_id);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox_events(status, next_attempt_at) WHERE status = 'PENDING';
+CREATE INDEX IF NOT EXISTS idx_pending_checkouts_paypal_order ON pending_checkouts(paypal_order_id);
+CREATE INDEX IF NOT EXISTS idx_pending_checkouts_state_hash ON pending_checkouts(state_token_hash);
+CREATE INDEX IF NOT EXISTS idx_pending_checkouts_tenant ON pending_checkouts(tenant_id, status);

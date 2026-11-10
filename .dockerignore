@@ -5,6 +5,7 @@ dist
 *.log
 data/
 private_uploads/
+temp_*/
 .env
 .env.*
 .DS_Store

@@ -151,16 +151,58 @@ export const PayPalIntegrationView: React.FC<PayPalIntegrationViewProps> = ({
               </span>
             </div>
 
+            <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
+              <span className="text-slate-500">Verification State:</span>
+              <span
+                className={`font-semibold font-mono ${
+                  status.verificationStatus === 'SANDBOX_AUTHENTICATED'
+                    ? 'text-emerald-700'
+                    : status.verificationStatus === 'AUTHENTICATION_FAILED'
+                    ? 'text-rose-700'
+                    : status.verificationStatus === 'CREDENTIALS_PRESENT_UNVERIFIED'
+                    ? 'text-amber-700'
+                    : 'text-blue-700'
+                }`}
+              >
+                {status.verificationStatus}
+              </span>
+            </div>
+
+            {status.lastVerifiedAt && (
+              <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
+                <span className="text-slate-500">Last Verified OAuth:</span>
+                <span className="font-mono text-slate-700">
+                  {new Date(status.lastVerifiedAt).toLocaleString()}
+                </span>
+              </div>
+            )}
+
+            {status.lastError && (
+              <div className="p-2.5 bg-rose-50 border border-rose-200 rounded text-rose-800 text-[11px] font-mono">
+                {status.lastError}
+              </div>
+            )}
+
             <div className="flex items-center justify-between py-1.5">
               <span className="text-slate-500">Connection Mode:</span>
               <span
                 className={`font-semibold font-mono ${
-                  status.isConfigured ? 'text-emerald-700' : 'text-blue-700'
+                  status.verificationStatus === 'SANDBOX_AUTHENTICATED'
+                    ? 'text-emerald-700'
+                    : status.verificationStatus === 'AUTHENTICATION_FAILED'
+                    ? 'text-rose-700'
+                    : status.isConfigured
+                    ? 'text-amber-700'
+                    : 'text-blue-700'
                 }`}
               >
-                {status.isConfigured
-                  ? 'LIVE SANDBOX API ACTIVE'
-                  : 'SANDBOX VERIFIED SIMULATION'}
+                {status.verificationStatus === 'SANDBOX_AUTHENTICATED'
+                  ? 'SANDBOX OAUTH VERIFIED'
+                  : status.verificationStatus === 'CREDENTIALS_PRESENT_UNVERIFIED'
+                  ? 'CREDENTIALS SET (UNVERIFIED)'
+                  : status.verificationStatus === 'AUTHENTICATION_FAILED'
+                  ? 'SANDBOX AUTH FAILED'
+                  : 'EXPLICIT SIMULATION MODE'}
               </span>
             </div>
           </div>
@@ -170,13 +212,13 @@ export const PayPalIntegrationView: React.FC<PayPalIntegrationViewProps> = ({
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-4 text-xs">
           <div className="flex items-center gap-2 mb-2">
             <Activity className="w-4 h-4 text-blue-600" />
-            <h2 className="text-sm font-bold text-slate-900">Sandbox Transaction Telemetry</h2>
+            <h2 className="text-sm font-bold text-slate-900">FairResolve Ledger & Gateway Telemetry</h2>
           </div>
 
           <div className="grid grid-cols-2 gap-3 text-center">
             <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
               <span className="text-[10px] uppercase font-mono text-slate-500 block">
-                Active Orders
+                Local Ledger Orders
               </span>
               <span className="text-xl font-bold font-mono text-slate-900 tabular-nums">
                 {status.activeOrderCount}
@@ -184,25 +226,33 @@ export const PayPalIntegrationView: React.FC<PayPalIntegrationViewProps> = ({
             </div>
             <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
               <span className="text-[10px] uppercase font-mono text-slate-500 block">
-                Refunds Processed
+                Live Sandbox / Simulated
               </span>
               <span className="text-xl font-bold font-mono text-emerald-700 tabular-nums">
-                {status.refundCount}
+                {status.genuineRefundCount} / {status.simulatedRefundCount}
               </span>
             </div>
-            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 col-span-2">
-              <span className="text-[10px] uppercase font-mono text-slate-500 block">
-                Total Gross Refunded Through Sandbox
+            <div className="p-3 bg-emerald-50/60 rounded-lg border border-emerald-200">
+              <span className="text-[10px] uppercase font-mono text-emerald-700 block">
+                Verified Sandbox Refunds
               </span>
-              <span className="text-xl font-bold font-mono text-slate-900 tabular-nums">
-                ${status.totalRefundedGross.toFixed(2)} USD
+              <span className="text-base font-bold font-mono text-emerald-900 tabular-nums">
+                ${(status.genuineRefundedGross ?? 0).toFixed(2)} USD
+              </span>
+            </div>
+            <div className="p-3 bg-amber-50/60 rounded-lg border border-amber-200">
+              <span className="text-[10px] uppercase font-mono text-amber-700 block">
+                Simulated Refund Total
+              </span>
+              <span className="text-base font-bold font-mono text-amber-900 tabular-nums">
+                ${(status.simulatedRefundedGross ?? 0).toFixed(2)} USD
               </span>
             </div>
           </div>
 
           <p className="text-[11px] text-slate-500 leading-relaxed pt-2">
-            Every refund operation generates a unique cryptographic idempotency key stored in the
-            outbox database before contacting PayPal. Ambiguous timeouts are reconciled safely.
+            Every refund operation records an idempotent ledger reservation before calling PayPal.
+            Live Sandbox refunds and simulated demo refunds are accounted separately above.
           </p>
         </div>
       </div>

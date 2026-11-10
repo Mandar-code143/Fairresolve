@@ -32,6 +32,7 @@ describe('FAIRRESOLVE — MINIMAL RAILWAY DEPLOYMENT VERIFICATION', () => {
     Object.keys(db.cases).forEach((k) => delete db.cases[k]);
     Object.keys(db.refundApprovals).forEach((k) => delete db.refundApprovals[k]);
     Object.keys(db.refundAttempts).forEach((k) => delete db.refundAttempts[k]);
+    Object.keys(db.pendingCheckouts).forEach((k) => delete db.pendingCheckouts[k]);
     db.outbox.length = 0;
 
     // 1. Setup in-memory PostgreSQL instance for isolated testing
@@ -134,15 +135,34 @@ describe('FAIRRESOLVE — MINIMAL RAILWAY DEPLOYMENT VERIFICATION', () => {
     expect(res.body.postgresActive).toBe(true);
   });
 
-  it('2. Actual Checkout Records Persist: Order, items, and case are persisted to PostgreSQL before 200 response', async () => {
+  it('2. Actual Checkout Records Persist: Order, items, pending_checkouts, and case are persisted to PostgreSQL before 200 response', async () => {
     const paypalOrderId = 'PPO-RW-CAPTURE-100';
 
-    // Mock PayPal capture order
+    vi.spyOn(paypalGateway, 'createOrder').mockResolvedValueOnce({
+      orderId: paypalOrderId,
+      approveUrl: `https://www.sandbox.paypal.com/checkoutnow?token=${paypalOrderId}`,
+      isSimulated: true,
+    });
+
+    const createRes = await supertest(app)
+      .post('/api/v1/paypal/orders')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        productType: 'headphones',
+        buyerName: 'Railway Buyer',
+        buyerEmail: 'buyer.railway@example.com',
+      });
+
+    expect(createRes.status).toBe(200);
+    expect(createRes.body.orderId).toBe(paypalOrderId);
+    expect(createRes.body.grossAmount).toBe(159.99);
+
+    // Mock PayPal capture order with matching gross amount (159.99 = 149.99 + 10.00)
     vi.spyOn(paypalGateway, 'captureOrder').mockResolvedValueOnce({
       orderId: paypalOrderId,
       captureId: 'CAP-RW-TEST-100',
       status: 'COMPLETED',
-      grossAmount: 150.0,
+      grossAmount: 159.99,
       currency: 'USD',
       payerEmail: 'buyer.railway@example.com',
       isSimulated: true,
@@ -152,10 +172,8 @@ describe('FAIRRESOLVE — MINIMAL RAILWAY DEPLOYMENT VERIFICATION', () => {
       .post(`/api/v1/paypal/orders/${paypalOrderId}/capture`)
       .set('Authorization', `Bearer ${ownerToken}`)
       .send({
-        productType: 'headphones',
         buyerName: 'Railway Buyer',
         buyerEmail: 'buyer.railway@example.com',
-        orderNumber: 'APX-RW-100',
       });
 
     expect(res.status).toBe(200);
@@ -165,6 +183,11 @@ describe('FAIRRESOLVE — MINIMAL RAILWAY DEPLOYMENT VERIFICATION', () => {
 
     const createdOrderId = res.body.order.id;
     const createdCaseId = res.body.case.id;
+
+    // Verify pending_checkouts status transitioned to CAPTURED in PostgreSQL
+    const checkoutRows = await pool.query('SELECT * FROM pending_checkouts WHERE paypal_order_id = $1', [paypalOrderId]);
+    expect(checkoutRows.rows.length).toBe(1);
+    expect(checkoutRows.rows[0].status).toBe('CAPTURED');
 
     // Verify order row exists in PostgreSQL
     const orderRows = await pool.query('SELECT * FROM orders WHERE id = $1', [createdOrderId]);

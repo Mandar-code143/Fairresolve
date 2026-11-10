@@ -5,9 +5,23 @@
 
 import dotenv from 'dotenv';
 import path from 'path';
+import crypto from 'crypto';
 
 // Load .env explicitly from root
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
+
+const nodeEnv = process.env.NODE_ENV || 'development';
+const isProd = nodeEnv === 'production';
+
+let resolvedSessionSecret = process.env.SESSION_SECRET || '';
+if (!resolvedSessionSecret) {
+  if (isProd) {
+    resolvedSessionSecret = crypto.randomBytes(32).toString('hex');
+    console.warn('[Config] WARNING: SESSION_SECRET env var not set in production; generated ephemeral runtime secret.');
+  } else {
+    resolvedSessionSecret = 'fairresolve-dev-session-secret';
+  }
+}
 
 const defaultAllowedOrigins = [
   'http://localhost:3000',
@@ -20,25 +34,29 @@ const rawAllowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
   : [...defaultAllowedOrigins];
 
+const derivedRailwayUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN.replace(/^https?:\/\//, '').replace(/\/+$/, '')}`
+  : '';
+
 const appBaseUrl = process.env.APP_BASE_URL
   ? process.env.APP_BASE_URL.replace(/\/+$/, '')
-  : `http://localhost:${process.env.PORT || 3000}`;
+  : derivedRailwayUrl || `http://localhost:${process.env.PORT || 3000}`;
 
-if (process.env.APP_BASE_URL) {
+for (const candidateUrl of [process.env.APP_BASE_URL, derivedRailwayUrl].filter(Boolean) as string[]) {
   try {
-    const origin = new URL(process.env.APP_BASE_URL).origin;
+    const origin = new URL(candidateUrl).origin;
     if (!rawAllowedOrigins.includes(origin)) {
       rawAllowedOrigins.push(origin);
     }
   } catch (_) {
-    if (!rawAllowedOrigins.includes(process.env.APP_BASE_URL)) {
-      rawAllowedOrigins.push(process.env.APP_BASE_URL);
+    if (!rawAllowedOrigins.includes(candidateUrl)) {
+      rawAllowedOrigins.push(candidateUrl);
     }
   }
 }
 
 export const config = {
-  NODE_ENV: process.env.NODE_ENV || 'development',
+  NODE_ENV: nodeEnv,
   PORT: process.env.PORT ? parseInt(process.env.PORT, 10) : 3000,
   DATABASE_URL: process.env.DATABASE_URL || '',
   DEMO_MODE: process.env.DEMO_MODE !== 'false',
@@ -55,7 +73,7 @@ export const config = {
   PAYPAL_WEBHOOK_ID: process.env.PAYPAL_WEBHOOK_ID || '',
   RUN_IN_PROCESS_WORKER: process.env.RUN_IN_PROCESS_WORKER !== 'false',
   SERVICE_TYPE: process.env.SERVICE_TYPE || 'app',
-  SESSION_SECRET: process.env.SESSION_SECRET || 'fairresolve-secure-session-salt-2026',
+  SESSION_SECRET: resolvedSessionSecret,
   ALLOWED_ORIGINS: rawAllowedOrigins,
 };
 

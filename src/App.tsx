@@ -26,8 +26,30 @@ import { apiFetch, setAuthToken, removeAuthToken } from './utils/api';
 import { Loader2, ShieldCheck, Lock, LogIn } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const initialSearch = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+  const initialPath = typeof window !== 'undefined' ? window.location.pathname : '/';
+  const portalTokenMatch = initialPath.startsWith('/portal/') ? initialPath.slice('/portal/'.length) : undefined;
+  const initialTabParam = initialSearch?.get('tab');
+
+  const [activeTab, setActiveTab] = useState<string>(
+    portalTokenMatch ? 'portal' : initialTabParam || 'dashboard'
+  );
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
+  const [checkoutReturnParams, setCheckoutReturnParams] = useState<{
+    status?: string | null;
+    checkoutId?: string | null;
+    message?: string | null;
+    replayed?: boolean;
+  } | null>(
+    initialSearch?.get('checkoutStatus')
+      ? {
+          status: initialSearch.get('checkoutStatus'),
+          checkoutId: initialSearch.get('checkoutId'),
+          message: initialSearch.get('message'),
+          replayed: initialSearch.get('replayed') === 'true',
+        }
+      : null
+  );
 
   const [cases, setCases] = useState<Case[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -161,6 +183,15 @@ export default function App() {
     description: 'Default Policy',
   };
 
+  const isSandboxVerified = gatewayStatus.verificationStatus === 'SANDBOX_AUTHENTICATED';
+
+  const clearCheckoutReturnParams = useCallback(() => {
+    setCheckoutReturnParams(null);
+    if (typeof window !== 'undefined') {
+      window.history.replaceState({}, '', '/');
+    }
+  }, []);
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 font-sans overflow-x-hidden">
       {/* Top Navbar */}
@@ -173,7 +204,7 @@ export default function App() {
         currentUser={currentUser}
         onOpenLoginModal={() => setIsLoginModalOpen(true)}
         onLogout={handleLogout}
-        isSandboxConfigured={gatewayStatus.isConfigured}
+        isSandboxConfigured={isSandboxVerified}
       />
 
       {/* Main Content Viewport */}
@@ -196,7 +227,7 @@ export default function App() {
                   setActiveTab('case-detail');
                 }}
                 onNavigate={(tab) => setActiveTab(tab)}
-                isSandboxConfigured={gatewayStatus.isConfigured}
+                isSandboxConfigured={isSandboxVerified}
               />
             )}
 
@@ -232,13 +263,17 @@ export default function App() {
                   setSelectedCaseId(caseId);
                   setActiveTab('case-detail');
                 }}
-                isSandboxConfigured={gatewayStatus.isConfigured}
+                isSandboxConfigured={isSandboxVerified}
+                verificationStatus={gatewayStatus.verificationStatus}
+                returnResultParams={checkoutReturnParams}
+                onClearReturnParams={clearCheckoutReturnParams}
               />
             )}
 
             {activeTab === 'portal' && (
               <CustomerPortalView
                 cases={cases}
+                activeToken={portalTokenMatch}
                 onSubmitted={() => {
                   fetchData();
                 }}

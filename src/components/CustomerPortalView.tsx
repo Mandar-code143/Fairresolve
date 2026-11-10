@@ -30,6 +30,7 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Form states
   const [issueType, setIssueType] = useState<IssueType>('damaged_item');
@@ -39,22 +40,28 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
     Array<{ filename: string; fileBase64: string; evidenceType: string; caption?: string }>
   >([]);
 
-  // Fetch token dispute context
   useEffect(() => {
     if (!selectedCaseToken) return;
 
     setLoading(true);
+    setErrorMessage(null);
     fetch(`/api/v1/customer/case/${selectedCaseToken}`)
-      .then((res) => res.json())
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to load dispute case');
+        return data;
+      })
       .then((data) => {
         setCaseContext(data);
         if (data.customerDescription) setDescription(data.customerDescription);
         if (data.issueType) setIssueType(data.issueType);
         if (data.requestedResolution) setRequestedResolution(data.requestedResolution);
-        setLoading(false);
       })
       .catch((err) => {
         console.error('Error fetching portal context:', err);
+        setErrorMessage(err.message || 'Unable to load dispute link.');
+      })
+      .finally(() => {
         setLoading(false);
       });
   }, [selectedCaseToken]);
@@ -85,9 +92,10 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!description.trim()) return;
+    if (!description.trim() || submitting) return;
 
     setSubmitting(true);
+    setErrorMessage(null);
     try {
       const res = await fetch(`/api/v1/customer/case/${selectedCaseToken}/submit`, {
         method: 'POST',
@@ -99,13 +107,18 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
           uploadedFiles,
         }),
       });
+      const data = await res.json().catch(() => ({}));
 
-      if (res.ok) {
-        setSuccess(true);
-        onSubmitted();
+      if (!res.ok) {
+        setErrorMessage(data.error || 'Submission rejected by server.');
+        return;
       }
-    } catch (err) {
+
+      setSuccess(true);
+      onSubmitted();
+    } catch (err: any) {
       console.error('Submission error:', err);
+      setErrorMessage(err.message || 'Network error while submitting dispute.');
     } finally {
       setSubmitting(false);
     }
@@ -180,6 +193,12 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
             </div>
           ) : (
             <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-6 text-xs">
+              {errorMessage && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>{errorMessage}</span>
+                </div>
+              )}
               {/* Order Context Card */}
               <div className="p-4 bg-slate-50 rounded-lg border border-slate-200">
                 <span className="font-mono text-[10px] uppercase text-slate-500 font-semibold block mb-2">
@@ -351,7 +370,9 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
           )}
         </div>
       ) : (
-        <div className="p-8 text-center text-slate-400">No dispute context found.</div>
+        <div className="p-8 text-center text-slate-500">
+          {errorMessage || 'No dispute context found.'}
+        </div>
       )}
     </div>
   );

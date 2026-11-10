@@ -15,6 +15,7 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { db, Session } from './database';
+import { config } from './config';
 import { User, UserRole } from '../types';
 import { permissionService, Permission as GranularPermission, ROLE_PERMISSIONS as GRANULAR_PERMISSIONS } from './permissions';
 
@@ -98,8 +99,13 @@ export class AuthService {
   ): { session: Session; token: string; csrfToken: string } {
     const token = crypto.randomBytes(32).toString('hex');
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    const csrfToken = crypto.randomBytes(24).toString('hex');
     const sessionId = `sess-${crypto.randomUUID()}`;
+    const csrfNonce = crypto.randomBytes(12).toString('hex');
+    const csrfMac = crypto
+      .createHmac('sha256', config.SESSION_SECRET)
+      .update(`${sessionId}:${csrfNonce}`)
+      .digest('hex');
+    const csrfToken = `${csrfNonce}.${csrfMac}`;
 
     const session: Session = {
       id: sessionId,
