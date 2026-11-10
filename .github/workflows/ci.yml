@@ -146,7 +146,7 @@ jobs:
           test "$(docker exec fairresolve-ci-app stat -c '%U' /app/data/private_uploads)" = "node"
 
           curl -fsS http://127.0.0.1:3000/health/live | grep -q '"status":"ok"'
-          curl -fsS http://127.0.0.1:3000/api/v1/does-not-exist -o /tmp/api404.json -w "%{http_code}\n" | grep -q "404"
+          curl -sS -o /tmp/api404.json -w "%{http_code}\n" http://127.0.0.1:3000/api/v1/does-not-exist | grep -q "404"
           grep -q "API route not found" /tmp/api404.json
 
           docker rm -f fairresolve-ci-app fairresolve-ci-pg

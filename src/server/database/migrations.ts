@@ -114,6 +114,22 @@ export const MIGRATIONS: MigrationDefinition[] = [
       }
     },
   },
+  {
+    version: 4,
+    name: 'outbox_nullable_tenant',
+    apply: async (client: pg.PoolClient) => {
+      const colRes = await client
+        .query(
+          "SELECT is_nullable FROM information_schema.columns WHERE table_name = 'outbox_events' AND column_name = 'tenant_id'"
+        )
+        .catch(() => ({ rows: [] as any[] }));
+      const isNullable = String(colRes.rows[0]?.is_nullable || '').toUpperCase();
+      if (isNullable === 'NO') {
+        const sql = resolveMigrationFile('004_outbox_nullable_tenant.sql');
+        await client.query(sql);
+      }
+    },
+  },
 ];
 
 export const REQUIRED_TABLES = [

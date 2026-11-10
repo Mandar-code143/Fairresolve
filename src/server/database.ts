@@ -2347,7 +2347,7 @@ export class Database {
         ON CONFLICT (id) DO NOTHING`,
         [
           event.id,
-          event.tenantId || 'tenant-apex-101',
+          !event.tenantId || event.tenantId === 'system' ? null : event.tenantId,
           event.eventType,
           JSON.stringify(event.payload),
           event.status,

@@ -97,6 +97,7 @@ describe('FAIRRESOLVE — REAL POSTGRESQL 16 AUTHORITATIVE PERSISTENCE & MIGRATI
       const firstRun = await runMigrations(pool);
       expect(firstRun.appliedVersions).toContain(2);
       expect(firstRun.appliedVersions).toContain(3);
+      expect(firstRun.appliedVersions).toContain(4);
 
       const secondRun = await runMigrations(pool);
       expect(secondRun.appliedVersions).toEqual([]);
@@ -113,7 +114,7 @@ describe('FAIRRESOLVE — REAL POSTGRESQL 16 AUTHORITATIVE PERSISTENCE & MIGRATI
       expect(readyRes.body.status).toBe('ready');
       expect(readyRes.body.postgresActive).toBe(true);
       expect(readyRes.body.postgresPingOk).toBe(true);
-      expect(readyRes.body.migrationVersion).toBeGreaterThanOrEqual(3);
+      expect(readyRes.body.migrationVersion).toBeGreaterThanOrEqual(4);
     }
   );
 

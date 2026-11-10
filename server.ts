@@ -145,8 +145,8 @@ app.get('/health/ready', async (_req, res) => {
       try {
         const migRes = await db.getPgPool()!.query('SELECT MAX(version) AS max_ver FROM schema_migrations');
         migrationVersion = Number(migRes.rows[0]?.max_ver || 0);
-        if (migrationVersion < 3) {
-          failures.push(`PostgreSQL schema migration incomplete (version=${migrationVersion}, expected>=3)`);
+        if (migrationVersion < 4) {
+          failures.push(`PostgreSQL schema migration incomplete (version=${migrationVersion}, expected>=4)`);
         }
       } catch (err: any) {
         failures.push(`Failed to inspect schema_migrations: ${err.message}`);
@@ -2279,32 +2279,37 @@ app.post('/api/v1/webhooks/paypal', async (req, res) => {
     return res.status(400).json({ error: 'Invalid PayPal webhook signature' });
   }
 
-  db.markWebhookProcessed(eventId);
-  if (db.isPostgresActive()) {
-    await db.persistWebhookEventPg({
-      eventId,
-      eventType,
-      resourceType: req.body?.resource_type,
-      resourceId: req.body?.resource?.id,
-      summary: req.body?.summary,
-      verificationStatus: 'VERIFIED',
-      rawPayload: req.body,
-      processed: true,
+  try {
+    db.markWebhookProcessed(eventId);
+    if (db.isPostgresActive()) {
+      await db.persistWebhookEventPg({
+        eventId,
+        eventType,
+        resourceType: req.body?.resource_type,
+        resourceId: req.body?.resource?.id,
+        summary: req.body?.summary,
+        verificationStatus: 'VERIFIED',
+        rawPayload: req.body,
+        processed: true,
+      });
+    }
+
+    // Enqueue webhook for durable processing
+    await backgroundWorker.enqueue({
+      eventType: 'PAYPAL_WEBHOOK_EVENT',
+      tenantId: 'system',
+      payload: {
+        webhookEventId: eventId,
+        webhookEventType: eventType,
+        resource: req.body.resource,
+      },
     });
+
+    return res.status(200).json({ received: true });
+  } catch (err: any) {
+    console.error('[Webhook] Failed to persist or enqueue verified webhook:', err.message);
+    return res.status(500).json({ error: err.message || 'Webhook processing error' });
   }
-
-  // Enqueue webhook for durable processing
-  await backgroundWorker.enqueue({
-    eventType: 'PAYPAL_WEBHOOK_EVENT',
-    tenantId: 'system',
-    payload: {
-      webhookEventId: eventId,
-      webhookEventType: eventType,
-      resource: req.body.resource,
-    },
-  });
-
-  res.status(200).json({ received: true });
 });
 
 // -------------------------------------------------------------

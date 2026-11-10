@@ -73,12 +73,13 @@ FairResolve automatically runs sequential, transactional, advisory-locked SQL mi
 - **v1 (`001_initial_schema`)**: Core relational tables (`tenants`, `users`, `sessions`, `invitations`, `orders`, `order_items`, `policies`, `cases`, `customer_access_tokens`, `evidence_objects`, `policy_evaluations`, `ai_runs`, `refund_approvals`, `refund_attempts`, `audit_events`, `outbox_events`, `paypal_webhook_events`).
 - **v2 (`002_refund_status_compatibility`)**: Ensures `refund_attempts` status constraint accepts `'SUCCEEDED'` and legacy `'COMPLETED'`, normalizes legacy `'COMPLETED'` rows cleanly on load, and guarantees `refund_approvals` expiry/policy columns exist.
 - **v3 (`003_pending_checkouts`)**: Adds durable `pending_checkouts` table & indexes for verified two-step PayPal checkout and return/cancel state tokens.
+- **v4 (`004_outbox_nullable_tenant`)**: Allows system-level webhook outbox events with nullable `tenant_id`.
 
 ---
 
 ## 5. Verification Checklist After Railway Deploy
 
-1. `GET https://<your-domain>.up.railway.app/health/ready` returns `200 OK` with `status: "ready"`, `postgresActive: true`, `migrationVersion: 3`, `storageWritable: true`, `workerActive: true`.
+1. `GET https://<your-domain>.up.railway.app/health/ready` returns `200 OK` with `status: "ready"`, `postgresActive: true`, `migrationVersion: 4`, `storageWritable: true`, `workerActive: true`.
 2. Sign in or register an OWNER account.
 3. Run a two-step checkout (create order -> approve in Sandbox or simulated capture -> capture) and verify redirect lands back on FairResolve with captured Order + Case.
 4. Submit customer claim via dispute link (`/portal/<token>`) with a JPEG/PNG image upload, then redeploy/restart container and confirm order, case, and image preview persist across restarts.
