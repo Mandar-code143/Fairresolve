@@ -87,13 +87,12 @@ describe('FAIRRESOLVE — REAL POSTGRESQL 16 AUTHORITATIVE PERSISTENCE & MIGRATI
          VALUES ('c-mig', 't-mig', 'FR-MIG', 'o-mig', 'APX-MIG', 'PPO-MIG', 'CAP-MIG', 'Buyer', 'buyer@mig.test', 'REFUNDED', 'damaged_item', 'full_refund', 'test')`
       );
       await pool.query(
-        `INSERT INTO refund_attempts (id, case_id, capture_id, idempotency_key, amount_cents, currency, status, authorized_by_user_id)
-         VALUES ('att-legacy-completed', 'c-mig', 'CAP-MIG', 'idemp-mig', 5000, 'USD', 'COMPLETED', 'u-mig')`
+        `INSERT INTO refund_attempts (id, case_id, tenant_id, capture_id, idempotency_key, amount_cents, currency, reason, status, authorized_by_user_id)
+         VALUES ('att-legacy-completed', 'c-mig', 't-mig', 'CAP-MIG', 'idemp-mig', 5000, 'USD', 'Legacy completed refund', 'COMPLETED', 'u-mig')`
       );
 
-      // Drop schema_migrations if present or verify full migration runner execution + idempotent rerun
-      await pool.query('DROP TABLE IF EXISTS pending_checkouts CASCADE');
-      await pool.query('DELETE FROM schema_migrations WHERE version >= 2');
+      // Simulate pre-migration schema without schema_migrations / pending_checkouts
+      await pool.query('DROP TABLE IF EXISTS pending_checkouts, schema_migrations CASCADE');
 
       const firstRun = await runMigrations(pool);
       expect(firstRun.appliedVersions).toContain(2);
@@ -122,8 +121,9 @@ describe('FAIRRESOLVE — REAL POSTGRESQL 16 AUTHORITATIVE PERSISTENCE & MIGRATI
     '2. Full E2E API lifecycle persists to PostgreSQL 16 and survives fresh Database reload without JSON reliance',
     async () => {
       vi.restoreAllMocks();
-      // Reset to clean migrated schema
+      // Reset to clean migrated schema and clean in-memory DB state
       await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+      db.reseed();
       await db.initPostgres(RAW_DATABASE_URL);
 
       // A. Register OWNER merchant
@@ -251,7 +251,8 @@ describe('FAIRRESOLVE — REAL POSTGRESQL 16 AUTHORITATIVE PERSISTENCE & MIGRATI
       const auditPg = await pool.query('SELECT * FROM audit_events WHERE case_id = $1 ORDER BY timestamp ASC', [caseId]);
       expect(auditPg.rows.some((r) => r.event_type === 'REFUND_EXECUTED')).toBe(true);
 
-      // G. Simulated Server Restart: Load a completely fresh Database instance directly from PostgreSQL (without touching JSON!)
+      // G. Simulated Server Restart: Flush in-flight async writes, delete JSON mirror, and reload fresh Database from PostgreSQL
+      await db.flush();
       const jsonPath = path.join(tempStorageDir, 'fairresolve_db.json');
       if (fs.existsSync(jsonPath)) fs.unlinkSync(jsonPath);
 
@@ -338,7 +339,8 @@ describe('FAIRRESOLVE — REAL POSTGRESQL 16 AUTHORITATIVE PERSISTENCE & MIGRATI
           `UPDATE outbox_events SET next_attempt_at = NOW() - INTERVAL '5 seconds' WHERE event_type = 'RECONCILE_PENDING_REFUND'`
         );
 
-        await backgroundWorker.pollAndProcess();
+        const processed = await backgroundWorker.pollAndProcess();
+        expect(processed).toBe(1);
 
         const ordAfter = await pool.query('SELECT * FROM orders WHERE id = $1', [orderId]);
         expect(Number(ordAfter.rows[0].refunded_amount_cents)).toBe(3000);

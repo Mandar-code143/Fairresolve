@@ -115,7 +115,7 @@ export class BackgroundWorker {
       try {
         await client.query('BEGIN');
         const selectRes = await client.query(
-          `SELECT id, tenant_id, event_type, payload, status, retry_count, max_retries, attempts, next_attempt_at, locked_at, locked_by
+          `SELECT id, tenant_id, event_type, payload, status, retry_count, max_retries, next_attempt_at, locked_at, locked_by, created_at
            FROM outbox_events
            WHERE (status = 'PENDING' AND next_attempt_at <= CURRENT_TIMESTAMP)
               OR (status = 'PROCESSING' AND locked_at < NOW() - INTERVAL '60 seconds')
@@ -130,18 +130,18 @@ export class BackgroundWorker {
         }
 
         candidateRow = selectRes.rows[0];
-        const newAttempts = (candidateRow.attempts || 0) + 1;
+        const newRetryCount = (candidateRow.retry_count || 0) + 1;
         await client.query(
           `UPDATE outbox_events
            SET status = 'PROCESSING',
                locked_at = CURRENT_TIMESTAMP,
                locked_by = $1,
-               attempts = $2
+               retry_count = $2
            WHERE id = $3`,
-          [this.workerId, newAttempts, candidateRow.id]
+          [this.workerId, newRetryCount, candidateRow.id]
         );
         await client.query('COMMIT');
-        candidateRow.attempts = newAttempts;
+        candidateRow.retry_count = newRetryCount;
       } catch (claimErr: any) {
         await client.query('ROLLBACK');
         console.warn('[Worker] Lease lock acquisition error:', claimErr.message);
@@ -156,7 +156,7 @@ export class BackgroundWorker {
         tenantId: candidateRow.tenant_id,
         payload: typeof candidateRow.payload === 'string' ? JSON.parse(candidateRow.payload) : candidateRow.payload,
         status: 'PROCESSING',
-        attempts: candidateRow.attempts,
+        attempts: candidateRow.retry_count,
         retryCount: candidateRow.retry_count || 0,
         createdAt: candidateRow.created_at ? new Date(candidateRow.created_at).toISOString() : new Date().toISOString(),
       };
@@ -165,6 +165,7 @@ export class BackgroundWorker {
       if (memEvent) {
         memEvent.status = 'PROCESSING';
         memEvent.attempts = event.attempts;
+        memEvent.retryCount = event.retryCount;
         memEvent.lockedAt = new Date().toISOString();
         memEvent.lockedBy = this.workerId;
       }

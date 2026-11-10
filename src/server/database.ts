@@ -89,6 +89,19 @@ export interface DatabaseSchema {
   invitations: Record<string, MerchantInvitation>;
 }
 
+function canonicalJsonStringify(value: any): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJsonStringify(item)).join(',')}]`;
+  }
+  const keys = Object.keys(value)
+    .filter((k) => value[k] !== undefined)
+    .sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJsonStringify(value[k])}`).join(',')}}`;
+}
+
 function resolveDataDir(): string {
   const configured = config.FAIRRESOLVE_STORAGE_DIR || process.env.FAIRRESOLVE_STORAGE_DIR || '';
   return configured.trim() ? path.resolve(configured.trim()) : path.resolve(process.cwd(), 'data');
@@ -102,6 +115,7 @@ export class Database {
   private data: DatabaseSchema;
   private saveDebounceTimer?: NodeJS.Timeout;
   private writePromise: Promise<void> = Promise.resolve();
+  private pendingPgWrites: Set<Promise<any>> = new Set();
   private pgPool?: pg.Pool;
   private isPostgresConnected: boolean = false;
   private isDataLoadedFromPg: boolean = false;
@@ -866,30 +880,69 @@ export class Database {
         };
       }
 
-      // 11. Audit Events
+      // 11. Audit Events (reorder topologically via hash links so same-ms PG rows preserve exact chain order)
       const aeRes = await this.pgPool.query('SELECT * FROM audit_events ORDER BY timestamp ASC');
-      for (const row of aeRes.rows) {
-        const ae: CaseEvent = {
-          id: row.id,
-          caseId: row.case_id || '',
-          eventType: row.event_type,
-          actor: {
-            type: row.actor_type,
-            id: row.actor_id || undefined,
-            name: row.actor_name,
-            role: row.actor_role || undefined,
-          },
-          summary: row.summary,
-          details: row.details ? (typeof row.details === 'string' ? JSON.parse(row.details) : row.details) : undefined,
-          timestamp: row.timestamp ? new Date(row.timestamp).toISOString() : new Date().toISOString(),
-          previousHash: row.previous_hash,
-          currentHash: row.current_hash,
-        };
-        if (!this.data.auditEvents.some((e) => e.id === ae.id)) {
-          this.data.auditEvents.push(ae);
+      const loadedAuditEvents: CaseEvent[] = aeRes.rows.map((row: any) => ({
+        id: row.id,
+        caseId: row.case_id || '',
+        eventType: row.event_type,
+        actor: {
+          type: row.actor_type,
+          id: row.actor_id || undefined,
+          name: row.actor_name,
+          role: row.actor_role || undefined,
+        },
+        summary: row.summary,
+        details: row.details ? (typeof row.details === 'string' ? JSON.parse(row.details) : row.details) : undefined,
+        timestamp: row.timestamp ? new Date(row.timestamp).toISOString() : new Date().toISOString(),
+        previousHash: row.previous_hash,
+        currentHash: row.current_hash,
+      }));
+
+      // Topologically order linked events by previousHash -> currentHash
+      if (loadedAuditEvents.length > 0) {
+        const byPrevHash = new Map<string, CaseEvent[]>();
+        const allCurrentHashes = new Set(loadedAuditEvents.map((e) => e.currentHash).filter(Boolean));
+        for (const ev of loadedAuditEvents) {
+          const prevKey = ev.previousHash || '';
+          const bucket = byPrevHash.get(prevKey) || [];
+          bucket.push(ev);
+          byPrevHash.set(prevKey, bucket);
         }
-        if (ae.caseId && this.data.cases[ae.caseId] && !this.data.cases[ae.caseId].timeline.some((e) => e.id === ae.id)) {
-          this.data.cases[ae.caseId].timeline.push(ae);
+
+        const ordered: CaseEvent[] = [];
+        const visited = new Set<string>();
+        const walk = (ev: CaseEvent) => {
+          if (visited.has(ev.id)) return;
+          visited.add(ev.id);
+          ordered.push(ev);
+          if (ev.currentHash) {
+            const children = byPrevHash.get(ev.currentHash) || [];
+            for (const child of children) {
+              walk(child);
+            }
+          }
+        };
+
+        for (const ev of loadedAuditEvents) {
+          if (!ev.previousHash || !allCurrentHashes.has(ev.previousHash)) {
+            walk(ev);
+          }
+        }
+        for (const ev of loadedAuditEvents) {
+          walk(ev);
+        }
+
+        if (forceInit) {
+          this.data.auditEvents = [];
+        }
+        for (const ae of ordered) {
+          if (!this.data.auditEvents.some((e) => e.id === ae.id)) {
+            this.data.auditEvents.push(ae);
+          }
+          if (ae.caseId && this.data.cases[ae.caseId] && !this.data.cases[ae.caseId].timeline.some((e) => e.id === ae.id)) {
+            this.data.cases[ae.caseId].timeline.push(ae);
+          }
         }
       }
 
@@ -1195,7 +1248,7 @@ export class Database {
       const previousHash =
         lastEvent?.currentHash || '0000000000000000000000000000000000000000000000000000000000000000';
       const storedDetails = { ...(params.eventDetails || {}), tenantId };
-      const payload = `${previousHash}|${caseId}|${params.eventType}|${nowIso}|${JSON.stringify(storedDetails)}`;
+      const payload = `${previousHash}|${caseId}|${params.eventType}|${nowIso}|${canonicalJsonStringify(storedDetails)}`;
       const currentHash = crypto.createHash('sha256').update(payload).digest('hex');
 
       return {
@@ -2415,7 +2468,17 @@ export class Database {
       clearTimeout(this.saveDebounceTimer);
       this.saveDebounceTimer = undefined;
     }
+    if (this.pendingPgWrites.size > 0) {
+      await Promise.allSettled(Array.from(this.pendingPgWrites));
+    }
     await this.saveAsyncSerialized();
+  }
+
+  private trackPgWrite(promise: Promise<any>): void {
+    this.pendingPgWrites.add(promise);
+    promise.finally(() => {
+      this.pendingPgWrites.delete(promise);
+    });
   }
 
   // -------------------------------------------------------------
@@ -3290,7 +3353,7 @@ export class Database {
   public appendAuditEvent(event: CaseEvent) {
     const lastEvent = this.data.auditEvents[this.data.auditEvents.length - 1];
     const previousHash = lastEvent?.currentHash || '0000000000000000000000000000000000000000000000000000000000000000';
-    const payload = `${previousHash}|${event.caseId}|${event.eventType}|${event.timestamp}|${JSON.stringify(event.details || {})}`;
+    const payload = `${previousHash}|${event.caseId}|${event.eventType}|${event.timestamp}|${canonicalJsonStringify(event.details || {})}`;
     event.previousHash = previousHash;
     event.currentHash = crypto.createHash('sha256').update(payload).digest('hex');
 
@@ -3298,28 +3361,31 @@ export class Database {
     this.scheduleSave();
 
     if (this.isPostgresConnected && this.pgPool) {
-      this.pgPool.query(
-        `INSERT INTO audit_events (
-          id, tenant_id, case_id, event_type, actor_type, actor_id, actor_name, actor_role,
-          summary, details, previous_hash, current_hash, timestamp
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-        ON CONFLICT (id) DO NOTHING`,
-        [
-          event.id,
-          this.data.cases[event.caseId]?.tenantId || 'tenant-apex-101',
-          event.caseId,
-          event.eventType,
-          event.actor.type,
-          event.actor.id || null,
-          event.actor.name,
-          event.actor.role || null,
-          event.summary,
-          event.details ? JSON.stringify(event.details) : null,
-          event.previousHash,
-          event.currentHash,
-          event.timestamp,
-        ]
-      ).catch((err) => console.warn('[Database] Failed to insert audit event into Postgres:', err.message));
+      const writePromise = this.pgPool
+        .query(
+          `INSERT INTO audit_events (
+            id, tenant_id, case_id, event_type, actor_type, actor_id, actor_name, actor_role,
+            summary, details, previous_hash, current_hash, timestamp
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          ON CONFLICT (id) DO NOTHING`,
+          [
+            event.id,
+            this.data.cases[event.caseId]?.tenantId || 'tenant-apex-101',
+            event.caseId,
+            event.eventType,
+            event.actor.type,
+            event.actor.id || null,
+            event.actor.name,
+            event.actor.role || null,
+            event.summary,
+            event.details ? JSON.stringify(event.details) : null,
+            event.previousHash,
+            event.currentHash,
+            event.timestamp,
+          ]
+        )
+        .catch((err) => console.warn('[Database] Failed to insert audit event into Postgres:', err.message));
+      this.trackPgWrite(writePromise);
     }
   }
 
@@ -3332,7 +3398,7 @@ export class Database {
         return { isValid: false, checkedCount: i, brokenAtIndex: i };
       }
       if (e.currentHash) {
-        const payload = `${e.previousHash || prev}|${e.caseId}|${e.eventType}|${e.timestamp}|${JSON.stringify(e.details || {})}`;
+        const payload = `${e.previousHash || prev}|${e.caseId}|${e.eventType}|${e.timestamp}|${canonicalJsonStringify(e.details || {})}`;
         const recomputed = crypto.createHash('sha256').update(payload).digest('hex');
         if (recomputed !== e.currentHash) {
           return { isValid: false, checkedCount: i, brokenAtIndex: i };

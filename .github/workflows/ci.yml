@@ -138,10 +138,12 @@ jobs:
             exit 1
           fi
 
-          # Verify app process runs as non-root node user and volume is writable
-          APP_USER="$(docker exec fairresolve-ci-app ps -o user= -C node | head -n 1 | xargs)"
-          echo "Running node process user: ${APP_USER}"
-          test "${APP_USER}" = "node"
+          # Verify app PID 1 runs as non-root node user (UID 1000) and /app/data volume was chowned to node
+          APP_UID="$(docker exec fairresolve-ci-app awk '/^Uid:/{print $2}' /proc/1/status)"
+          echo "Running node process UID: ${APP_UID}"
+          test "${APP_UID}" = "1000"
+          test "$(docker exec fairresolve-ci-app stat -c '%U' /app/data)" = "node"
+          test "$(docker exec fairresolve-ci-app stat -c '%U' /app/data/private_uploads)" = "node"
 
           curl -fsS http://127.0.0.1:3000/health/live | grep -q '"status":"ok"'
           curl -fsS http://127.0.0.1:3000/api/v1/does-not-exist -o /tmp/api404.json -w "%{http_code}\n" | grep -q "404"
